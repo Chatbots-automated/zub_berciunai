@@ -1,8 +1,5 @@
-// Works as a Vercel Serverless Function (api/extractpdf.js)
-// and as a Next.js Pages API route (pages/api/extractpdf.js)
-
+// api/extractpdf.js
 const pdfParse = require("pdf-parse");
-const formidable = require("formidable");
 
 // --- utils ---------------------------------------------------------------
 
@@ -22,7 +19,6 @@ function parseAnimalsFromText(text) {
     .filter(Boolean);
 
   const out = [];
-  // idx species tag name sex breed... date age [passport?]
   const rowRe =
     /^(\d+)\s+(\S+)\s+([A-Z]{2}\d+|LT\d+|DE\d+)\s+(\S+)\s+(\S+)\s+(.+?)\s+(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\s+(\d+)(?:\s+([A-Z0-9\-\/]+))?$/;
 
@@ -30,7 +26,6 @@ function parseAnimalsFromText(text) {
     const m = l.match(rowRe);
     if (!m) continue;
     const [, , species, tag, name, sex, breedPlus, date, age, pass] = m;
-
     out.push({
       tag_no: tag || null,
       species: (species || "").toLowerCase() || null,
@@ -44,38 +39,7 @@ function parseAnimalsFromText(text) {
   }
 
   const seen = new Set();
-  return out.filter((r) => {
-    if (!r.tag_no) return false;
-    if (seen.has(r.tag_no)) return false;
-    seen.add(r.tag_no);
-    return true;
-  });
-}
-
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (e) {
-        reject(e);
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-function readMultipart(req) {
-  return new Promise((resolve, reject) => {
-    const form = formidable({ multiples: false, maxFileSize: 50 * 1024 * 1024 }); // 50MB
-    form.parse(req, (err, fields, files) => {
-      if (err) return reject(err);
-      resolve({ fields, files });
-    });
-  });
+  return out.filter((r) => r.tag_no && !seen.has(r.tag_no) && seen.add(r.tag_no));
 }
 
 // --- handler -------------------------------------------------------------
@@ -90,29 +54,39 @@ module.exports = async function handler(req, res) {
     const ct = (req.headers["content-type"] || "").toLowerCase();
     let pdfBuffer = null;
 
-    if (ct.includes("multipart/form-data")) {
-      const { files } = await readMultipart(req);
-      const f = files.file; // field name must be "file"
-      if (!f) {
-        res.status(400).json({ error: "file missing (multipart field 'file')" });
-        return;
-      }
-      // formidable gives { filepath } in v3
-      const fs = require("fs");
-      pdfBuffer = fs.readFileSync(f.filepath);
+    if (ct.includes("application/pdf") || ct.includes("application/octet-stream")) {
+      // RAW BINARY BODY (n8n "n8n Binary File")
+      const chunks = [];
+      await new Promise((resolve, reject) => {
+        req.on("data", (c) => chunks.push(c));
+        req.on("end", resolve);
+        req.on("error", reject);
+      });
+      pdfBuffer = Buffer.concat(chunks);
+
     } else if (ct.includes("application/json")) {
-      const body = await readJsonBody(req);
+      // JSON with { url }
+      const body = await new Promise((resolve, reject) => {
+        let data = "";
+        req.setEncoding("utf8");
+        req.on("data", (ch) => (data += ch));
+        req.on("end", () => {
+          try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); }
+        });
+        req.on("error", reject);
+      });
+
       if (!body || !body.url) {
-        res.status(400).json({ error: "Provide multipart 'file' or JSON { url }" });
+        res.status(400).json({ error: "Provide raw PDF body or JSON { url }" });
         return;
       }
-      const fetchRes = await fetch(body.url);
-      if (!fetchRes.ok) {
+      const r = await fetch(body.url);
+      if (!r.ok) {
         res.status(400).json({ error: "Cannot fetch URL" });
         return;
       }
-      const arrBuf = await fetchRes.arrayBuffer();
-      pdfBuffer = Buffer.from(arrBuf);
+      pdfBuffer = Buffer.from(await r.arrayBuffer());
+
     } else {
       res.status(400).json({ error: "Unsupported content-type" });
       return;
@@ -128,8 +102,5 @@ module.exports = async function handler(req, res) {
   }
 };
 
-// For Next.js Pages API (ignored by Vercel raw functions):
-// - disables the built-in body parser so multipart works.
-module.exports.config = {
-  api: { bodyParser: false }
-};
+// If used as Next.js Pages API route, disable body parser:
+module.exports.config = { api: { bodyParser: false } };
