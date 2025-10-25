@@ -4,86 +4,109 @@ const pdfParse = require("pdf-parse");
 // ---------- helpers ----------
 function toISO(d) {
   if (!d) return null;
-  const m1 = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/); // 2025-10-25
-  const m2 = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/); // 25-10-2025
+  const m1 = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
+  const m2 = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
   if (m1) return `${m1[1]}-${m1[2]}-${m1[3]}`;
   if (m2) return `${m2[3]}-${m2[2]}-${m2[1]}`;
   return null;
 }
 
-function normalizeLine(s) {
-  return s.replace(/\s+/g, " ").trim();
-}
+// Character class incl. Lithuanian letters (upper+lower)
+const LIT = "A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž";
+const WORD = `[${LIT}'’.-]+`;
+const WORDS = `[${LIT} '’.-]+`;
 
 /**
- * Parse animals strictly starting after the header row:
- * "Eil. Nr. Rūšis Numeris Vardas Lytis Veislė Gimimo data Amžius Paso Serija | Numeris"
+ * Parse animals by scanning the raw text from the header down with a global regex.
+ * Rows in the PDF often have *no spaces* between columns, e.g.:
+ *   1GalvijaiDE000123...KarvėHolšteinai2018-05-2189
  */
 function parseAnimalsFromText(text) {
-  const allLines = text.split(/\r?\n/).map(normalizeLine).filter(Boolean);
+  // Find header line position in the raw text (not normalized)
+  const headerPattern = /Eil\.\s*Nr\.[\s\S]*?Gimimo\s*data/i;
+  const headerMatch = text.match(headerPattern);
+  const startIdx = headerMatch ? text.indexOf(headerMatch[0]) : -1;
 
-  // Find the header line (tolerate diacritics / capitalization)
+  // Derive a "preview lines" like before, for easier debugging
+  const allLines = text.split(/\r?\n/).map((s) => s.replace(/\s+/g, " ").trim()).filter(Boolean);
   const headerIdx = allLines.findIndex((l) =>
-    /Eil\.\s*Nr\./i.test(l) &&
-    /(Rūšis|Rusis)/i.test(l) &&
-    /Numeris/i.test(l) &&
-    /Gimimo\s*data/i.test(l)
+    /Eil\.\s*Nr\./i.test(l) && /(Rūšis|Rusis)/i.test(l) && /Gimimo\s*data/i.test(l)
   );
 
-  // If header not found, bail early
-  if (headerIdx === -1) {
-    return { rows: [], debug: { headerIdx, totalLines: allLines.length } };
+  if (startIdx === -1 || headerIdx === -1) {
+    return {
+      rows: [],
+      debug: { headerIdx, totalLines: allLines.length, startIdx, foundHeader: false }
+    };
   }
 
-  const lines = allLines.slice(headerIdx + 1);
+  const body = text.slice(startIdx); // scan from header onwards
 
-  const out = [];
-  /**
-   * Row pattern:
-   *  idx  species  tag   [optional name]  sex  breed....   date         age  [passport]
-   *  1    Galvijai DE... (Jonė)           Karvė Holšteinai 2018-05-21   89   AF-...
-   *
-   * - name is optional because in many reports it's blank
-   * - breed can be multi-word; we lazily grab until the date
-   */
-  const rowRe =
-    /^(\d+)\s+(\S+)\s+([A-Z]{2}\d+|LT\d+|DE\d+)\s+(?:(\S+)\s+)?(\S+)\s+(.+?)\s+(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\s+(\d+)(?:\s+([A-Z0-9\-\/]+))?$/;
+  // Global regex:
+  //  index   species    tag                       (optional name)   sex                               breed              date           age     (optional passport)
+  const rowRe = new RegExp(
+    String.raw`(\d+)` +                 // 1: row index
+    String.raw`\s*` +
+    String.raw`(Galvijai)` +            // 2: species text (in these PDFs always "Galvijai")
+    String.raw`\s*` +
+    String.raw`(DE\d+|LT\d+)` +         // 3: tag (DE..., LT...)
+    String.raw`\s*` +
+    String.raw`(?:(${WORD})\s*)?` +     // 4: optional name (single token if present; usually absent)
+    String.raw`(Karvė|Telyčaitė|Bulius|Telyciaite|Telyčia|Telycia)` + // 5: sex (variants)
+    String.raw`\s*` +
+    String.raw`(${WORDS}?)` +           // 6: breed (lazy; we’ll trim later)
+    String.raw`(\d{4}-\d{2}-\d{2})` +   // 7: date (anchors the end of breed)
+    String.raw`(\d+)` +                 // 8: age (often glued right after the date)
+    String.raw`(?:\s*([A-Z]{2}-\d+))?` +// 9: optional passport (e.g., AF-096882)
+    String.raw``,
+    "g"
+  );
 
-  for (const l of lines) {
-    const m = l.match(rowRe);
-    if (!m) continue;
-    const [, idx, species, tag, nameMaybe, sex, breedPlus, date, age, pass] = m;
+  const rows = [];
+  let m;
+  while ((m = rowRe.exec(body)) !== null) {
+    const [
+      _,
+      idx,
+      speciesText,
+      tag,
+      nameMaybe,
+      sexRaw,
+      breedRaw,
+      dateStr,
+      ageStr,
+      passport,
+    ] = m;
 
-    out.push({
+    // Clean breed (it may include trailing spaces)
+    const breed = (breedRaw || "").trim();
+
+    rows.push({
       row_index: Number(idx),
-      tag_no: tag || null,
-      species: (species || "").toLowerCase() || null,
+      species: speciesText.toLowerCase(),
+      tag_no: tag,
       name: nameMaybe || null,
-      sex: sex ? sex.charAt(0).toUpperCase() + sex.slice(1).toLowerCase() : null,
-      breed: breedPlus || null,
-      birth_date: toISO(date),
-      age_months: age ? Number(age) : null,
-      passport: pass || null,
-      _raw: l,
+      sex: sexRaw ? sexRaw.charAt(0).toUpperCase() + sexRaw.slice(1).toLowerCase() : null,
+      breed: breed || null,
+      birth_date: toISO(dateStr),
+      age_months: ageStr ? Number(ageStr) : null,
+      passport: passport || null,
     });
   }
 
-  // Deduplicate by tag_no
+  // Dedup by tag
   const seen = new Set();
-  const rows = out.filter((r) => {
-    if (!r.tag_no) return false;
-    if (seen.has(r.tag_no)) return false;
-    seen.add(r.tag_no);
-    return true;
-  });
+  const unique = rows.filter((r) => !seen.has(r.tag_no) && seen.add(r.tag_no));
 
   return {
-    rows,
+    rows: unique,
     debug: {
       headerIdx,
       totalLines: allLines.length,
+      startIdx,
+      foundHeader: true,
       previewAroundHeader: allLines.slice(Math.max(0, headerIdx - 2), headerIdx + 8),
-      matched: rows.length,
+      matched: unique.length,
     },
   };
 }
@@ -112,9 +135,7 @@ module.exports = async function handler(req, res) {
         let data = "";
         req.setEncoding("utf8");
         req.on("data", (ch) => (data += ch));
-        req.on("end", () => {
-          try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); }
-        });
+        req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
         req.on("error", reject);
       });
       if (!body || !body.url) {
@@ -132,7 +153,6 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    // ---- LOGS (show in Vercel → Functions → Logs) ----
     console.log("[extractpdf] content-type:", ct);
     console.log("[extractpdf] buffer bytes:", pdfBuffer ? pdfBuffer.length : 0);
 
@@ -140,15 +160,14 @@ module.exports = async function handler(req, res) {
     console.log("[extractpdf] text length:", parsed.text ? parsed.text.length : 0);
 
     const { rows, debug } = parseAnimalsFromText(parsed.text || "");
-    console.log("[extractpdf] headerIdx:", debug.headerIdx, "totalLines:", debug.totalLines);
-    console.log("[extractpdf] previewAroundHeader:", debug.previewAroundHeader);
+    console.log("[extractpdf] headerIdx:", debug.headerIdx, "startIdx:", debug.startIdx, "totalLines:", debug.totalLines);
     console.log("[extractpdf] matched rows:", debug.matched);
 
     res.setHeader("Cache-Control", "no-store");
     res.status(200).json({
       count: rows.length,
-      animals: rows.map(({ _raw, ...r }) => r), // don’t return _raw by default
-      debug,                                   // keep debug for now while tuning
+      animals: rows,
+      debug,
     });
   } catch (e) {
     console.error("[extractpdf] ERROR:", e);
@@ -156,5 +175,5 @@ module.exports = async function handler(req, res) {
   }
 };
 
-// If used as Next.js Pages API route, disable body parser:
+// Next.js Pages API: disable body parser
 module.exports.config = { api: { bodyParser: false } };
