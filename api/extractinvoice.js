@@ -2,6 +2,8 @@
 const pdfParse = require("pdf-parse");
 
 // ---------- utils ----------
+function norm(s) { return (s || "").replace(/\s+/g, " ").trim(); }
+function linesOf(text) { return (text || "").split(/\r?\n/).map(norm).filter(Boolean); }
 function toISO(d) {
   if (!d) return null;
   const m1 = d.match(/^(\d{4})[.\-\/](\d{2})[.\-\/](\d{2})$/);
@@ -10,80 +12,99 @@ function toISO(d) {
   if (m2) return `${m2[3]}-${m2[2]}-${m2[1]}`;
   return null;
 }
-// Normalize EU-style numbers: "14.000,00" → 14000.00 ; "0,04" → 0.04 ; "610 00" → 610.00
+// EU number normalizer: "14.000,00" → 14000.00 ; "2.521" → 2.521 ; "610 00" → 610.00
 function num(s) {
   if (s == null) return null;
-  const cleaned = String(s)
-    .replace(/\s/g, "")
-    .replace(/[^0-9,.\-]/g, "")       // keep digits, comma, dot, minus
-    // treat dots as thousand sep when there is also a comma
-    .replace(/(\d)\.(?=\d{3}([.,]|$))/g, "$1")
-    .replace(",", ".");
-  const v = Number(cleaned);
+  let t = String(s).replace(/\s/g, "").replace(/[^0-9,.\-]/g, "");
+  // remove thousand dots when a comma/decimal exists
+  t = t.replace(/(\d)\.(?=\d{3}([.,]|$))/g, "$1");
+  // if there are both dot and comma, assume comma is decimal
+  if (t.includes(",") && t.includes(".")) t = t.replace(/\./g, "").replace(",", ".");
+  else t = t.replace(",", ".");
+  const v = Number(t);
   return Number.isFinite(v) ? v : null;
 }
-function norm(s) { return (s || "").replace(/\s+/g, " ").trim(); }
-function linesOf(text) { return (text || "").split(/\r?\n/).map(norm).filter(Boolean); }
+
+function mostRecentDate(text) {
+  const ds = [];
+  const rx = /\b(\d{2}[.\-\/]\d{2}[.\-\/]\d{4}|\d{4}[.\-\/]\d{2}[.\-\/]\d{2})\b/g;
+  let m;
+  while ((m = rx.exec(text))) {
+    const iso = toISO(m[1]);
+    if (iso) ds.push(iso);
+  }
+  ds.sort(); // lexicographic works for ISO
+  return ds.length ? ds[ds.length - 1] : null;
+}
+
+function between(text, startMarker, endMarker) {
+  const s = text.indexOf(startMarker);
+  if (s === -1) return null;
+  const e = text.indexOf(endMarker, s + startMarker.length);
+  return e === -1 ? text.slice(s + startMarker.length) : text.slice(s + startMarker.length, e);
+}
 
 // ---------- header parsing ----------
 function parseHeader(text) {
   const t = text;
 
-  // Invoice number
-  // Handles: "PVM SĄSKAITA - FAKTŪRA AVNG serija Nr.0092292" or "... Nr.: 0092292" or simple "Nr. X"
+  // Prefer dates near "Serija" or an explicit "Data" label
+  const serDate = (t.match(/Serija[^\n\r]*?\b(\d{2}[.\-\/]\d{2}[.\-\/]\d{4})\b/i) || [])[1];
+  const labeledDate = (t.match(/\b(Išrašymo|Išdavimo|Data|Issue)\s*[:\-]?\s*(\d{2}[.\-\/]\d{2}[.\-\/]\d{4}|\d{4}[.\-\/]\d{2}[.\-\/]\d{2})/i) || [])[2];
+  const dateISO = toISO(serDate || labeledDate) || mostRecentDate(t);
+
+  // Invoice number (catch “PVM SĄSKAITA… serija Nr.0092292”, “Serija DBG/Data 5250125994/01.10.2025” etc.)
   const nr =
-    t.match(/Sąskaita\s*-\s*faktūra.*?(?:serija\s*)?Nr\.?\s*[:.]?\s*([A-Za-z0-9\-\/_.]+)/i) ||
-    t.match(/PVM\s*SĄSKAITA.*?(?:serija\s*)?Nr\.?\s*[:.]?\s*([A-Za-z0-9\-\/_.]+)/i) ||
-    t.match(/\b(?:Faktūra|Invoice)\s*Nr\.?\s*([A-Za-z0-9\-\/_.]+)/i) ||
-    t.match(/\bNr\.?\s*([A-Za-z0-9\-\/_.]{4,})\b/);
+    (t.match(/Sąskaita\s*-\s*faktūra[^\n\r]*?\b(?:serija)?\s*Nr\.?\s*[:.]?\s*([A-Za-z0-9\-\/_.]+)/i) || [])[1] ||
+    (t.match(/\bSerija[^\n\r]*?\b([A-Z0-9\-\/_.]{5,})\b/i) || [])[1] ||
+    (t.match(/\b(?:Faktūra|Invoice)\s*Nr\.?\s*([A-Za-z0-9\-\/_.]+)/i) || [])[1] ||
+    (t.match(/\bNr\.?\s*([A-Za-z0-9\-\/_.]{4,})\b/) || [])[1] || null;
 
-  // Date (look for “2025 m. spalio 7 d.”, “2025-10-01”, “01.10.2025”, etc.)
-  const dateRaw =
-    t.match(/\b(20\d{2})\s*m\.\s*[^\d]{0,6}\s*(\d{1,2})\s*d\./i) ? // e.g., "2025 m. spalio 7 d."
-      (() => {
-        const m = t.match(/\b(20\d{2})\s*m\.\s*[^\d]{0,10}\s*(\d{1,2})\s*d\./i);
-        // Month name not trivial; fallback to numeric date elsewhere if present.
-        return null;
-      })()
-    : null;
+  // Split by labeled blocks for better supplier detection
+  const supplierBlock = between(t, "Tiekėjas", "Pirkėjas") || between(t, "Tiekėjas:", "Pirkėjas:") || null;
 
-  const dateMatch =
-    t.match(/\b(?:Data|Išrašymo\s*data|Issue\s*date|202\d[-.\/]\d{2}[-.\/]\d{2}|\d{2}[-.\/]\d{2}[-.\/]202\d)\b.*?(\d{2}[.\-\/]\d{2}[.\-\/]20\d{2}|20\d{2}[.\-\/]\d{2}[.\-\/]\d{2})/) ||
-    t.match(/\b(20\d{2}[.\-\/]\d{2}[.\-\/]\d{2})\b/) ||
-    t.match(/\b(\d{2}[.\-\/]\d{2}[.\-\/]20\d{2})\b/);
+  // Supplier fields
+  let supplierName = null, supVat = null, supCode = null, iban = null;
+  if (supplierBlock) {
+    const sb = supplierBlock;
+    supplierName = (sb.match(/^.*\b(UAB|AB|MB|IĮ|VŠĮ|ŪB)\b.*$/mi) || [])[0] || null;
+    supVat = (sb.match(/\b(PVM\s*kodas|VAT)\s*[:\-]?\s*([A-Z]{2}\d{5,12})/i) || [])[2] || null;
+    supCode = (sb.match(/\b(Įmonės\s*kodas|Imonės\s*kodas|Kodas)\s*[:\-]?\s*(\d{7,})/i) || [])[2] || null;
+    iban = (sb.match(/\bIBAN\s*[:\-]?\s*([A-Z]{2}[0-9A-Z]{13,34})\b/) || [])[1] || null;
+  } else {
+    // fallback: whole text
+    supplierName = (t.match(/^.*\b(UAB|AB|MB|IĮ|VŠĮ|ŪB)\b.*$/mi) || [])[0] || null;
+    supVat = (t.match(/\b(PVM\s*kodas|VAT)\s*[:\-]?\s*([A-Z]{2}\d{5,12})/i) || [])[2] || null;
+    supCode = (t.match(/\b(Įmonės\s*kodas|Imonės\s*kodas|Kodas)\s*[:\-]?\s*(\d{7,})/i) || [])[2] || null;
+    iban = (t.match(/\bIBAN\s*[:\-]?\s*([A-Z]{2}[0-9A-Z]{13,34})\b/) || [])[1] || null;
+  }
 
+  // Currency
   const currency = (t.match(/\b(EUR|USD|GBP|PLN)\b/) || [])[1] || "EUR";
 
-  // Supplier
-  const supVat = (t.match(/\b(PVM\s*kodas|VAT)\s*[:\-]?\s*([A-Z]{2}\d{5,12})/i) || [])[2] || null;
-  const supCode = (t.match(/\b(Įmonės\s*kodas|Imonės\s*kodas|Kodas)\s*[:\-]?\s*(\d{7,})/i) || [])[2] || null;
-  const iban = (t.match(/\bIBAN\s*[:\-]?\s*([A-Z]{2}[0-9A-Z]{13,34})\b/) || [])[1] || null;
-
-  // Heuristics for supplier name: take the first “UAB/AB/MB/…” occurrence near bank/IBAN/VAT blocks
-  let supplierName = null;
-  const supNameRx = /^.*\b(UAB|AB|MB|IĮ|VŠĮ|ŪB)\b.*$/mi;
-  const sn = t.match(supNameRx);
-  if (sn) supplierName = norm(sn[0]);
-
   // Totals
-  const totalNet = num((t.match(/\b(Suma\s*be\s*PVM|Tarpinė\s*suma|Net\s*amount)\s*[:\-]?\s*([0-9 .,\-]+)\b/i) || [])[2]);
-  const totalVat = num((t.match(/\b(PVM\s*suma|PVM|VAT)\s*[:\-]?\s*([0-9 .,\-]+)\b/i) || [])[2]);
-  const totalGross = num((t.match(/\b(Suma\s*su\s*PVM|Bendra\s*suma|Iš viso|Total)\s*[:\-]?\s*([0-9 .,\-]+)\b/i) || [])[2]);
-  const vatRate = (t.match(/\bPVM\s*tarif(as|ai)?\s*[:\-]?\s*(\d{1,2})\s*%/i) || [])[2] ? parseInt((t.match(/\bPVM\s*tarif(as|ai)?\s*[:\-]?\s*(\d{1,2})\s*%/i) || [])[2], 10) : null;
+  const totalNet =
+    num((t.match(/\b(PVM\s*apmokestinama\s*suma|Suma\s*be\s*PVM|Tarpinė\s*suma|Net\s*amount)\s*[:\-]?\s*([0-9 .,\-]+)\b/i) || [])[2]);
+  const totalVat =
+    num((t.match(/\b(PVM\s*suma|VAT)\s*[:\-]?\s*([0-9 .,\-]+)\b/i) || [])[2]);
+  const totalGross =
+    num((t.match(/\b(Iš\s*viso|Bendra\s*suma|Total|Suma\s*su\s*PVM)\s*[:\-]?\s*([0-9 .,\-]+)\b/i) || [])[2]);
 
-  const invDateISO = dateMatch ? toISO(dateMatch[1] || dateMatch[0]) : null;
+  const vatRate = (t.match(/\bPVM\s*tarif(as|ai)?\s*[:\-]?\s*(\d{1,2})\s*%/i) || [])[2]
+    ? parseInt((t.match(/\bPVM\s*tarif(as|ai)?\s*[:\-]?\s*(\d{1,2})\s*%/i) || [])[2], 10)
+    : null;
 
   return {
     supplier: {
-      name: supplierName,
-      code: supCode,
-      vat_code: supVat,
+      name: supplierName ? norm(supplierName) : null,
+      code: supCode || null,
+      vat_code: supVat || null,
       address: null,
-      iban
+      iban: iban || null,
     },
     invoice: {
-      number: nr ? (nr[1] || nr[2]) : null,
-      date: invDateISO,
+      number: nr,
+      date: dateISO,
       currency,
       total_net: totalNet,
       total_vat: totalVat,
@@ -93,54 +114,51 @@ function parseHeader(text) {
   };
 }
 
-// ---------- line parsing ----------
-/**
- * We support two common patterns:
- *  (A) Full line with columns (SKU?) Desc ... Qty Unit Price VAT% Net VAT Gross
- *  (B) Minimal line: Desc ... Qty [Unit?] Price VAT% Gross
- * We stop when we hit totals lines like "Iš viso", "Suma", "Total".
- */
+// ---------- lines parsing ----------
 function parseLines(text) {
   const LIT = "A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž";
   const UNIT = `[${LIT}%/\\.a-zA-Z]{1,8}`;
-  const NUM = String.raw`(?:\d{1,3}(?:[ .]\d{3})*|\d+)(?:[.,]\d{2})?`; // 14.000,00 ; 0,04 ; 610 00
+  // allow 2–4 decimals
+  const NUM = String.raw`(?:\d{1,3}(?:[ .]\d{3})*|\d+)(?:[.,]\d{2,4})?`;
   const STOP = /(iš viso|viso|bendra suma|total)/i;
 
   const ls = linesOf(text);
   const out = [];
   let lineNo = 0;
 
-  // Patterns
+  // (1) Full table: Desc … Qty Unit Price VAT% Net VAT Gross  (Avena)
   const reFull = new RegExp(
-    // optional SKU
     String.raw`^(?:(?<sku>[A-Z0-9\-\._]{2,})\s+)?` +
-    // description (anything non-greedy until we can match quantities/prices)
     String.raw`(?<desc>.+?)\s+` +
-    // quantity (may have comma) possibly glued to comma/paren (e.g., "200,00(" from Avena PDF)
-    String.raw`(?<qty>${NUM})\s*[\(\)]?\s+` +
-    // optional unit
+    String.raw`(?<qty>${NUM})\s*` +
     String.raw`(?:(?<unit>${UNIT})\s+)?` +
-    // price
     String.raw`(?<price>${NUM})\s+` +
-    // VAT %
     String.raw`(?<vat>\d{1,2})\s*%?\s+` +
-    // net
     String.raw`(?<net>${NUM})\s+` +
-    // vat amount
     String.raw`(?<vatamt>${NUM})\s+` +
-    // gross
     String.raw`(?<gross>${NUM})\s*$`,
     "i"
   );
 
-  const reMinimal = new RegExp(
+  // (2) Four columns: Desc … Qty Unit Price Sum  (Kalnapilis)
+  const reFour = new RegExp(
     String.raw`^(?:(?<sku>[A-Z0-9\-\._]{2,})\s+)?` +
     String.raw`(?<desc>.+?)\s+` +
-    String.raw`(?<qty>${NUM})\s*[\(\)]?\s+` +
-    String.raw`(?:(?<unit>${UNIT})\s+)?` +
+    String.raw`(?<qty>${NUM})\s+` +
+    String.raw`(?<unit>${UNIT})\s+` +
     String.raw`(?<price>${NUM})\s+` +
-    String.raw`(?<vat>\d{1,2})\s*%?\s+` +
-    String.raw`(?<gross>${NUM})\s*$`,
+    String.raw`(?<sum>${NUM})\s*$`,
+    "i"
+  );
+
+  // (3) Minimal fallback
+  const reMin = new RegExp(
+    String.raw`^(?:(?<sku>[A-Z0-9\-\._]{2,})\s+)?` +
+    String.raw`(?<desc>.+?)\s+` +
+    String.raw`(?<qty>${NUM})\s*` +
+    String.raw`(?:(?<unit>${UNIT})\s+)?` +
+    String.raw`(?<price>${NUM})` +
+    String.raw`(?:\s+(?<gross>${NUM}))?\s*$`,
     "i"
   );
 
@@ -148,31 +166,41 @@ function parseLines(text) {
     if (!raw) continue;
     if (STOP.test(raw)) break;
 
-    let m = raw.match(reFull) || raw.match(reMinimal);
-    if (!m) continue;
-    const g = m.groups || {};
+    let g = null, kind = null;
+    let m = raw.match(reFull);
+    if (m) { g = m.groups || {}; kind = "full"; }
+    else if ((m = raw.match(reFour))) { g = m.groups || {}; kind = "four"; }
+    else if ((m = raw.match(reMin))) { g = m.groups || {}; kind = "min"; }
+    if (!g) continue;
 
     lineNo += 1;
-    const qty = num(g.qty);
-    const price = num(g.price);
-    const vatRate = g.vat ? parseInt(g.vat, 10) : null;
 
-    // derive numbers if missing
-    let net = g.net ? num(g.net) : (price != null && qty != null ? +(price * qty).toFixed(2) : null);
-    let gross = g.gross ? num(g.gross) : (net != null && vatRate != null ? +(net * (1 + vatRate / 100)).toFixed(2) : null);
-    let vatAmt = g.vatamt ? num(g.vatamt) : (gross != null && net != null ? +(gross - net).toFixed(2) : null);
+    const qty = num(g.qty);
+    const unit = g.unit || null;
+    const price = num(g.price);
+    let net = g.net ? num(g.net) : null;
+    let vatRate = g.vat ? parseInt(g.vat, 10) : null;
+    let vatAmt = g.vatamt ? num(g.vatamt) : null;
+    let gross = g.gross ? num(g.gross) : null;
+
+    // For the four-column layout: sum is net (no VAT column on row)
+    if (kind === "four") {
+      net = num(g.sum);
+      // header totals will provide VAT; we keep row vat null
+    }
+    // For minimal: derive net/gross when possible
+    if (!net && qty != null && price != null) net = +(qty * price).toFixed(2);
+    if (!gross && net != null && vatRate != null) gross = +(net * (1 + vatRate/100)).toFixed(2);
+    if (!vatAmt && gross != null && net != null) vatAmt = +(gross - net).toFixed(2);
 
     out.push({
       line_no: lineNo,
       sku: g.sku || null,
       description: norm(g.desc),
-      qty,
-      unit: g.unit || null,
-      unit_price: price,
+      qty, unit, unit_price: price,
       vat_rate: vatRate,
-      net,
-      vat: vatAmt,
-      gross
+      net, vat: vatAmt, gross,
+      _kind: kind
     });
   }
 
@@ -207,15 +235,9 @@ module.exports = async function handler(req, res) {
         req.on("error", reject);
       });
       const b = body ? JSON.parse(body) : {};
-      if (!b.url) {
-        res.status(400).json({ error: "Provide raw PDF body or JSON { url }" });
-        return;
-      }
+      if (!b.url) { res.status(400).json({ error: "Provide raw PDF body or JSON { url }" }); return; }
       const r = await fetch(b.url);
-      if (!r.ok) {
-        res.status(400).json({ error: "Cannot fetch URL" });
-        return;
-      }
+      if (!r.ok) { res.status(400).json({ error: "Cannot fetch URL" }); return; }
       pdfBuffer = Buffer.from(await r.arrayBuffer());
     } else {
       res.status(400).json({ error: "Unsupported content-type", contentType: ct });
@@ -228,7 +250,7 @@ module.exports = async function handler(req, res) {
     const header = parseHeader(text);
     const items = parseLines(text);
 
-    // Compute totals if missing
+    // Compute totals if missing (and align four-col rows with header VAT if present)
     const sumNet = items.lines.reduce((a, r) => a + (r.net || 0), 0);
     const sumVat = items.lines.reduce((a, r) => a + (r.vat || 0), 0);
     const sumGross = items.lines.reduce((a, r) => a + (r.gross || 0), 0);
@@ -237,21 +259,22 @@ module.exports = async function handler(req, res) {
     if (header.invoice.total_vat == null && sumVat) header.invoice.total_vat = +sumVat.toFixed(2);
     if (header.invoice.total_gross == null && sumGross) header.invoice.total_gross = +sumGross.toFixed(2);
 
-    // Basic vendor hints (helps later if you want per-supplier tweaks)
+    // Vendor hint for future vendor-specific tweaks
     let vendor_hint = null;
     if (/Kalnapil/i.test(text)) vendor_hint = "Kalnapilis";
     if (/Avena/i.test(text)) vendor_hint = vendor_hint ? vendor_hint + ", Avena" : "Avena";
-
-    // Logs (visible in Vercel Functions logs)
-    console.log("[extractinvoice] bytes:", pdfBuffer.length, "text:", text.length, "lines:", items.matched, "vendor:", vendor_hint);
 
     res.setHeader("Cache-Control", "no-store");
     res.status(200).json({
       supplier: header.supplier,
       invoice: header.invoice,
-      lines: items.lines,
+      lines: items.lines.map(({ _kind, ...r }) => r),
       vendor_hint,
-      debug: { text_len: text.length, matched_lines: items.matched }
+      debug: {
+        text_len: text.length,
+        matched_lines: items.matched,
+        kinds: items.lines.reduce((acc, r) => (acc[r._kind] = (acc[r._kind]||0)+1, acc), {})
+      }
     });
   } catch (e) {
     console.error("[extractinvoice] ERROR:", e);
@@ -259,5 +282,4 @@ module.exports = async function handler(req, res) {
   }
 };
 
-// Next.js Pages API compatibility:
 module.exports.config = { api: { bodyParser: false } };
