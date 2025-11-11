@@ -1,17 +1,15 @@
-// api/ingest-gea.js
 import fs from 'fs';
 import fsp from 'fs/promises';
 import formidable from 'formidable';
 import { read, utils } from 'xlsx';
 
-export const config = { api: { bodyParser: false, sizeLimit: '100mb' } };
+export const config = {
+  api: { bodyParser: false, sizeLimit: '100mb' }
+};
 
 const SNAPSHOT_PATH = '/tmp/gea_headers.json';
 
-// ---- Built-in fallback (used only if file has no headers AND no snapshot/env headers) ----
-// NOTE: Order may vary across farms. For exact order, prefer:
-//  1) Upload one file WITH headers once (we'll snapshot to /tmp), or
-//  2) Set env GEA_HEADERS="h1,h2,..." to force the mapping.
+// Your permanent header map (exactly as provided)
 const BUILTIN_FALLBACK = [
   'karves nr','kaklo nr','statusas','grupe','pieno vidurkis',
   'melzimo data','melzimo laikas','pieno kiekis',
@@ -19,12 +17,7 @@ const BUILTIN_FALLBACK = [
   'melzimo data','melzimo laikas','pieno kiekis',
   'melzimo data','melzimo laikas','pieno kiekis',
   'melzimo data','melzimo laikas','pieno kiekis',
-  'dalyvauja pieno gamyboje',
-  // legacy names (kept): 
-  'apsiversiavo','laktacijos dienos','apseklinimo diena',
-  // NEW columns (requested): 
-  'apsiveršiavimas','laktacijos dienos','apsėklinta',
-  'liko iki apsiveršiavimo','veršingumas dienomis','veislinė vertė'
+  'dalyvauja pieno gamyboje','apsiversiavo','laktacijos dienos','apseklinimo diena'
 ];
 
 const FALLBACK_FROM_ENV = (process.env.GEA_HEADERS || '')
@@ -60,18 +53,19 @@ function detectHasHeader(firstRow) {
   return (strish.length / cells.length) >= 0.5;
 }
 
-// De-dupe repeated names → first stays plain, repeats get _2, _3 ...
+// ---------- NEW: header de-duplication so repeated names don’t overwrite ----------
 function dedupeHeaders(headers) {
   const seen = Object.create(null);
   return headers.map(h => {
     const base = normHdr(h) || 'Col';
     if (!seen[base]) { seen[base] = 1; return base; }
     const idx = ++seen[base];
+    // First occurrence keeps plain name, repeats get suffixes _2, _3...
     return `${base}_${idx}`;
   });
 }
 
-// ---- Normalizers ----
+// ---------- Normalizers ----------
 function toISODate(val) {
   if (val == null) return null;
   if (val instanceof Date) {
@@ -82,22 +76,26 @@ function toISODate(val) {
   }
   const s = String(val).trim();
   if (!s) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;                 // ISO
-  let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);               // dd.MM.yyyy
+  // Already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // dd.MM.yyyy
+  let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);             // M/D/YY|YYYY
+  // M/D/YY or M/D/YYYY → assume US style from Excel text
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
   if (m) {
     const mm = String(m[1]).padStart(2,'0');
     const dd = String(m[2]).padStart(2,'0');
     const yy = m[3].length === 2 ? `20${m[3]}` : m[3];
     return `${yy}-${mm}-${dd}`;
   }
-  return s;
+  return s; // leave as-is if unknown
 }
 function toTime(val) {
   if (val == null) return null;
   const s = String(val).trim();
   if (!s) return null;
+  // H:mm or HH:mm
   const m = s.match(/^(\d{1,2}):(\d{2})$/);
   if (m) {
     const hh = String(m[1]).padStart(2,'0');
@@ -115,38 +113,27 @@ function toNum(val) {
 function toBoolLT(val) {
   if (val == null) return null;
   const s = String(val).trim().toLowerCase();
-  if (s === 'taip' || s === 'true' || s === '1') return true;
-  if (s === 'ne'   || s === 'false' || s === '0') return false;
+  if (s === 'taip') return true;
+  if (s === 'ne') return false;
   return null;
 }
 
+// Apply normalization per column name
 function normalizeRow(obj) {
   const out = { ...obj };
 
   // tag alias
   if (out['karves nr']) out.tag_no = String(out['karves nr']).trim() || null;
 
-  // date fields: by keyword & explicit column names
+  // dates
   for (const k of Object.keys(out)) {
     const lk = k.toLowerCase();
-    if (
-      lk.includes('data') ||
-      lk === 'apsiversiavo' ||          // legacy
-      lk === 'apseklinimo diena' ||     // legacy
-      lk === 'apsėklinta' ||            // NEW
-      lk === 'apsiveršiavimas'          // NEW
-    ) {
+    if (lk.includes('data') || lk === 'apsiversiavo' || lk === 'apseklinimo diena') {
       out[k] = toISODate(out[k]);
     }
-    if (lk.includes('laikas')) out[k] = toTime(out[k]);
-  }
-
-  // keep SQL compatibility: map new → legacy if legacy missing
-  if (out['apsėklinta'] && !out['apseklinimo diena']) {
-    out['apseklinimo diena'] = out['apsėklinta'];
-  }
-  if (out['apsiveršiavimas'] && !out['apsiversiavo']) {
-    out['apsiversiavo'] = out['apsiveršiavimas'];
+    if (lk.includes('laikas')) {
+      out[k] = toTime(out[k]);
+    }
   }
 
   // booleans
@@ -158,16 +145,14 @@ function normalizeRow(obj) {
   const numericKeys = [
     'pieno vidurkis',
     'pieno kiekis','pieno kiekis_2','pieno kiekis_3','pieno kiekis_4','pieno kiekis_5',
-    'laktacijos dienos','kaklo nr','grupe',
-    // NEW numeric fields:
-    'liko iki apsiveršiavimo', 'veršingumas dienomis', 'veislinė vertė'
+    'laktacijos dienos','kaklo nr','grupe','veislinė vertė'
   ];
   for (const k of numericKeys) if (k in out) out[k] = toNum(out[k]);
 
   return out;
 }
 
-// Excel → AOA
+// Excel → rows (AOA)
 function parseExcelBuffer(buf) {
   const wb = read(buf, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -201,7 +186,7 @@ async function getUploadBuffer(req) {
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
-      res.status(405).json({ error: 'Use POST. Send multipart/form-data (field "file") or raw XLSX bytes.' });
+      res.status(405).json({ error: 'Use POST. Send multipart/form-data (field "file") or raw XLSX binary.' });
       return;
     }
 
@@ -218,7 +203,7 @@ export default async function handler(req, res) {
 
     if (detectHasHeader(rows[0])) {
       headers = rows[0].map(normHdr);
-      headers = dedupeHeaders(headers);
+      headers = dedupeHeaders(headers);          // <<=== prevent overwrite of repeated names
       dataStartIdx = 1;
       if (headers.some(Boolean)) await saveSnapshotHeaders(headers);
     } else {
@@ -231,21 +216,26 @@ export default async function handler(req, res) {
         const maxLen = Math.max(...rows.map(r => (Array.isArray(r) ? r.length : 0)));
         headers = Array.from({ length: maxLen }, (_, i) => `Col_${i+1}`);
       }
+      // If the fallback contains repeats, also dedupe
       headers = dedupeHeaders(headers);
       dataStartIdx = 0;
     }
 
-    // Build records
+    // Build row objects
     const H = headers.length;
     const dataRows = rows.slice(dataStartIdx).map(r => {
       const rr = Array.isArray(r) ? r.slice(0, H) : Array(H).fill(null);
       if (rr.length < H) rr.push(...Array(H - rr.length).fill(null));
       const obj = {};
       for (let i = 0; i < H; i++) obj[headers[i]] = rr[i];
-      return normalizeRow(obj);
+      return normalizeRow(obj);                  // <<=== normalize here
     });
 
-    res.status(200).json({ columns: headers, count: dataRows.length, rows: dataRows });
+    res.status(200).json({
+      columns: headers,
+      count: dataRows.length,
+      rows: dataRows
+    });
   } catch (err) {
     const msg = String(err?.message || err);
     if (/no parser found/i.test(msg)) {
