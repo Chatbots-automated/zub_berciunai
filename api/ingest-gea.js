@@ -1,3 +1,4 @@
+// api/ingest-gea.js
 import fs from 'fs';
 import fsp from 'fs/promises';
 import formidable from 'formidable';
@@ -9,7 +10,7 @@ export const config = {
 
 const SNAPSHOT_PATH = '/tmp/gea_headers.json';
 
-// Your permanent header map (exactly as provided)
+// Built-in fallback (kept for safety; ENV will override if present)
 const BUILTIN_FALLBACK = [
   'karves nr','kaklo nr','statusas','grupe','pieno vidurkis',
   'melzimo data','melzimo laikas','pieno kiekis',
@@ -20,11 +21,13 @@ const BUILTIN_FALLBACK = [
   'dalyvauja pieno gamyboje','apsiversiavo','laktacijos dienos','apseklinimo diena','veislinė vertė'
 ];
 
+// ENV fallback (highest priority when present)
 const FALLBACK_FROM_ENV = (process.env.GEA_HEADERS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 const normHdr = s => String(s ?? '').trim();
 
+// ---------- snapshot helpers ----------
 function loadSnapshotHeaders() {
   try {
     const raw = fs.readFileSync(SNAPSHOT_PATH, 'utf8');
@@ -37,6 +40,7 @@ async function saveSnapshotHeaders(headers) {
   try { await fsp.writeFile(SNAPSHOT_PATH, JSON.stringify(headers, null, 2), 'utf8'); } catch {}
 }
 
+// ---------- header detection ----------
 function looksLikeTag(value) {
   if (typeof value !== 'string') return false;
   const v = value.trim();
@@ -53,19 +57,19 @@ function detectHasHeader(firstRow) {
   return (strish.length / cells.length) >= 0.5;
 }
 
-// ---------- NEW: header de-duplication so repeated names don’t overwrite ----------
+// ---------- dedupe repeated header names ----------
 function dedupeHeaders(headers) {
   const seen = Object.create(null);
   return headers.map(h => {
     const base = normHdr(h) || 'Col';
     if (!seen[base]) { seen[base] = 1; return base; }
     const idx = ++seen[base];
-    // First occurrence keeps plain name, repeats get suffixes _2, _3...
+    // First keeps plain name; duplicates become _2, _3, ...
     return `${base}_${idx}`;
   });
 }
 
-// ---------- Normalizers ----------
+// ---------- cell normalizers ----------
 function toISODate(val) {
   if (val == null) return null;
   if (val instanceof Date) {
@@ -76,27 +80,23 @@ function toISODate(val) {
   }
   const s = String(val).trim();
   if (!s) return null;
-  // Already ISO
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // dd.MM.yyyy
-  let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;               // already ISO
+  let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);             // dd.MM.yyyy
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-  // M/D/YY or M/D/YYYY → assume US style from Excel text
-  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);           // M/D/YY(YY)
   if (m) {
     const mm = String(m[1]).padStart(2,'0');
     const dd = String(m[2]).padStart(2,'0');
     const yy = m[3].length === 2 ? `20${m[3]}` : m[3];
     return `${yy}-${mm}-${dd}`;
   }
-  return s; // leave as-is if unknown
+  return s;
 }
 function toTime(val) {
   if (val == null) return null;
   const s = String(val).trim();
   if (!s) return null;
-  // H:mm or HH:mm
-  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);                   // H:mm / HH:mm
   if (m) {
     const hh = String(m[1]).padStart(2,'0');
     return `${hh}:${m[2]}`;
@@ -115,17 +115,19 @@ function toBoolLT(val) {
   const s = String(val).trim().toLowerCase();
   if (s === 'taip') return true;
   if (s === 'ne') return false;
+  if (s === 'true' || s === '1' || s === 'yes') return true;
+  if (s === 'false' || s === '0' || s === 'no') return false;
   return null;
 }
 
-// Apply normalization per column name
+// normalize per column
 function normalizeRow(obj) {
   const out = { ...obj };
 
   // tag alias
   if (out['karves nr']) out.tag_no = String(out['karves nr']).trim() || null;
 
-  // dates
+  // dates & times
   for (const k of Object.keys(out)) {
     const lk = k.toLowerCase();
     if (lk.includes('data') || lk === 'apsiversiavo' || lk === 'apseklinimo diena') {
@@ -141,7 +143,7 @@ function normalizeRow(obj) {
     out['dalyvauja pieno gamyboje'] = toBoolLT(out['dalyvauja pieno gamyboje']);
   }
 
-  // numbers
+  // numbers (include 'veislinė vertė')
   const numericKeys = [
     'pieno vidurkis',
     'pieno kiekis','pieno kiekis_2','pieno kiekis_3','pieno kiekis_4','pieno kiekis_5',
@@ -159,7 +161,7 @@ function parseExcelBuffer(buf) {
   return utils.sheet_to_json(ws, { header: 1, blankrows: false, raw: false, defval: null });
 }
 
-// Accept multipart (field "file") or raw binary
+// Accept multipart (field "file") or raw octet-stream
 async function getUploadBuffer(req) {
   const ct = (req.headers['content-type'] || '').toLowerCase();
   if (ct.startsWith('multipart/form-data')) {
@@ -185,10 +187,18 @@ async function getUploadBuffer(req) {
 
 export default async function handler(req, res) {
   try {
+    // Maintenance hook: clear cached snapshot (/tmp) once if needed
+    if (req.method === 'DELETE' || req.query?.clearSnapshot === '1') {
+      try { await fsp.unlink(SNAPSHOT_PATH); } catch {}
+      return res.status(200).json({ cleared: true, path: SNAPSHOT_PATH });
+    }
+
     if (req.method !== 'POST') {
       res.status(405).json({ error: 'Use POST. Send multipart/form-data (field "file") or raw XLSX binary.' });
       return;
     }
+
+    const preferEnv = req.query?.preferEnv === '1' || req.headers['x-gea-prefer-env'] === '1';
 
     const { buffer } = await getUploadBuffer(req);
     const rows = parseExcelBuffer(buffer);
@@ -203,32 +213,40 @@ export default async function handler(req, res) {
 
     if (detectHasHeader(rows[0])) {
       headers = rows[0].map(normHdr);
-      headers = dedupeHeaders(headers);          // <<=== prevent overwrite of repeated names
+      headers = dedupeHeaders(headers);
       dataStartIdx = 1;
       if (headers.some(Boolean)) await saveSnapshotHeaders(headers);
     } else {
-      headers =
-        loadSnapshotHeaders() ||
-        (FALLBACK_FROM_ENV.length ? FALLBACK_FROM_ENV.map(normHdr) : null) ||
-        (BUILTIN_FALLBACK.length ? dedupeHeaders(BUILTIN_FALLBACK) : null);
+      const snap = loadSnapshotHeaders();
+      const envHdrs = FALLBACK_FROM_ENV.length ? FALLBACK_FROM_ENV.map(normHdr) : null;
+      const built  = BUILTIN_FALLBACK.length ? BUILTIN_FALLBACK.map(normHdr)       : null;
 
-      if (!headers) {
+      // Priority: preferEnv→ENV, otherwise ENV→SNAPSHOT→BUILTIN
+      let pref = (preferEnv && envHdrs) || envHdrs || snap || built;
+
+      if (!pref) {
         const maxLen = Math.max(...rows.map(r => (Array.isArray(r) ? r.length : 0)));
-        headers = Array.from({ length: maxLen }, (_, i) => `Col_${i+1}`);
+        pref = Array.from({ length: maxLen }, (_, i) => `Col_${i+1}`);
       }
-      // If the fallback contains repeats, also dedupe
-      headers = dedupeHeaders(headers);
+
+      // If snapshot exists and ENV is longer (e.g., adds "veislinė vertė"), merge extras
+      if (snap && envHdrs && envHdrs.length > snap.length) {
+        const set = new Set(pref);
+        for (const h of envHdrs) if (!set.has(h)) { pref.push(h); set.add(h); }
+      }
+
+      headers = dedupeHeaders(pref);
       dataStartIdx = 0;
     }
 
-    // Build row objects
+    // Build normalized objects
     const H = headers.length;
     const dataRows = rows.slice(dataStartIdx).map(r => {
       const rr = Array.isArray(r) ? r.slice(0, H) : Array(H).fill(null);
       if (rr.length < H) rr.push(...Array(H - rr.length).fill(null));
       const obj = {};
       for (let i = 0; i < H; i++) obj[headers[i]] = rr[i];
-      return normalizeRow(obj);                  // <<=== normalize here
+      return normalizeRow(obj);
     });
 
     res.status(200).json({
