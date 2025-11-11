@@ -1,24 +1,15 @@
-// Vercel/Next.js API: uploads an XLSX and maps rows to the exact headers.
-// Accepts EITHER multipart/form-data (field "file") OR raw binary body.
-// If the first row has headers, we learn & cache them in /tmp for future headerless files.
-// We also hardcode your provided header list as a built-in fallback.
-
 import fs from 'fs';
 import fsp from 'fs/promises';
 import formidable from 'formidable';
 import { read, utils } from 'xlsx';
 
 export const config = {
-  api: {
-    bodyParser: false,      // we handle stream ourselves / via formidable
-    sizeLimit: '100mb'
-  }
+  api: { bodyParser: false, sizeLimit: '100mb' }
 };
 
-// ---- Persistent header snapshot (per-deployment; resets on cold start) ----
 const SNAPSHOT_PATH = '/tmp/gea_headers.json';
 
-// ---- Built-in fallback headers (YOUR list) ----
+// Your permanent header map (exactly as provided)
 const BUILTIN_FALLBACK = [
   'karves nr','kaklo nr','statusas','grupe','pieno vidurkis',
   'melzimo data','melzimo laikas','pieno kiekis',
@@ -29,15 +20,10 @@ const BUILTIN_FALLBACK = [
   'dalyvauja pieno gamyboje','apsiversiavo','laktacijos dienos','apseklinimo diena'
 ];
 
-// ---- Optional env fallback (comma-separated) ----
 const FALLBACK_FROM_ENV = (process.env.GEA_HEADERS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split(',').map(s => s.trim()).filter(Boolean);
 
-function normHdr(s) {
-  return String(s ?? '').trim();
-}
+const normHdr = s => String(s ?? '').trim();
 
 function loadSnapshotHeaders() {
   try {
@@ -47,14 +33,10 @@ function loadSnapshotHeaders() {
   } catch {}
   return null;
 }
-
 async function saveSnapshotHeaders(headers) {
-  try {
-    await fsp.writeFile(SNAPSHOT_PATH, JSON.stringify(headers, null, 2), 'utf8');
-  } catch {}
+  try { await fsp.writeFile(SNAPSHOT_PATH, JSON.stringify(headers, null, 2), 'utf8'); } catch {}
 }
 
-// Detect if first row is headers (simple heuristic)
 function looksLikeTag(value) {
   if (typeof value !== 'string') return false;
   const v = value.trim();
@@ -71,90 +53,146 @@ function detectHasHeader(firstRow) {
   return (strish.length / cells.length) >= 0.5;
 }
 
-function normCell(v) {
-  if (v == null) return null;
-  if (v instanceof Date) {
-    const y = v.getFullYear();
-    const m = String(v.getMonth() + 1).padStart(2, '0');
-    const d = String(v.getDate()).padStart(2, '0');
+// ---------- NEW: header de-duplication so repeated names don’t overwrite ----------
+function dedupeHeaders(headers) {
+  const seen = Object.create(null);
+  return headers.map(h => {
+    const base = normHdr(h) || 'Col';
+    if (!seen[base]) { seen[base] = 1; return base; }
+    const idx = ++seen[base];
+    // First occurrence keeps plain name, repeats get suffixes _2, _3...
+    return `${base}_${idx}`;
+  });
+}
+
+// ---------- Normalizers ----------
+function toISODate(val) {
+  if (val == null) return null;
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth()+1).padStart(2,'0');
+    const d = String(val.getDate()).padStart(2,'0');
     return `${y}-${m}-${d}`;
   }
-  if (typeof v === 'string') {
-    const s = v.trim();
-    if (s === '' || s === '-' || s === '—') return null;
-    // ISO yyyy-mm-dd
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    // dd.MM.yyyy -> ISO
-    const m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
-    if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-    return s;
+  const s = String(val).trim();
+  if (!s) return null;
+  // Already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // dd.MM.yyyy
+  let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  // M/D/YY or M/D/YYYY → assume US style from Excel text
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const mm = String(m[1]).padStart(2,'0');
+    const dd = String(m[2]).padStart(2,'0');
+    const yy = m[3].length === 2 ? `20${m[3]}` : m[3];
+    return `${yy}-${mm}-${dd}`;
   }
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  return v;
+  return s; // leave as-is if unknown
+}
+function toTime(val) {
+  if (val == null) return null;
+  const s = String(val).trim();
+  if (!s) return null;
+  // H:mm or HH:mm
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (m) {
+    const hh = String(m[1]).padStart(2,'0');
+    return `${hh}:${m[2]}`;
+  }
+  return s;
+}
+function toNum(val) {
+  if (val == null) return null;
+  if (typeof val === 'number' && Number.isFinite(val)) return val;
+  const s = String(val).trim().replace(/\s/g,'').replace(',','.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+function toBoolLT(val) {
+  if (val == null) return null;
+  const s = String(val).trim().toLowerCase();
+  if (s === 'taip') return true;
+  if (s === 'ne') return false;
+  return null;
 }
 
-function alignRow(row, len) {
-  const r = Array.isArray(row) ? [...row] : [];
-  if (r.length < len) r.push(...Array(len - r.length).fill(null));
-  if (r.length > len) r.length = len;
-  return r;
+// Apply normalization per column name
+function normalizeRow(obj) {
+  const out = { ...obj };
+
+  // tag alias
+  if (out['karves nr']) out.tag_no = String(out['karves nr']).trim() || null;
+
+  // dates
+  for (const k of Object.keys(out)) {
+    const lk = k.toLowerCase();
+    if (lk.includes('data') || lk === 'apsiversiavo' || lk === 'apseklinimo diena') {
+      out[k] = toISODate(out[k]);
+    }
+    if (lk.includes('laikas')) {
+      out[k] = toTime(out[k]);
+    }
+  }
+
+  // booleans
+  if ('dalyvauja pieno gamyboje' in out) {
+    out['dalyvauja pieno gamyboje'] = toBoolLT(out['dalyvauja pieno gamyboje']);
+  }
+
+  // numbers
+  const numericKeys = [
+    'pieno vidurkis',
+    'pieno kiekis','pieno kiekis_2','pieno kiekis_3','pieno kiekis_4','pieno kiekis_5',
+    'laktacijos dienos','kaklo nr','grupe'
+  ];
+  for (const k of numericKeys) if (k in out) out[k] = toNum(out[k]);
+
+  return out;
 }
 
-// --- Read an XLSX buffer into AOA rows ---
+// Excel → rows (AOA)
 function parseExcelBuffer(buf) {
   const wb = read(buf, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
-  const rows = utils.sheet_to_json(ws, { header: 1, blankrows: false, raw: false, defval: null });
-  return rows;
+  return utils.sheet_to_json(ws, { header: 1, blankrows: false, raw: false, defval: null });
 }
 
-// --- Try to get a file buffer from either multipart or raw body ---
+// Accept multipart (field "file") or raw binary
 async function getUploadBuffer(req) {
   const ct = (req.headers['content-type'] || '').toLowerCase();
-
-  // If multipart/form-data → use formidable
   if (ct.startsWith('multipart/form-data')) {
-    const form = formidable({
-      multiples: false,
-      keepExtensions: true,
-      maxFileSize: 100 * 1024 * 1024
-    });
-    const { buffer, originalFilename } = await new Promise((resolve, reject) => {
+    const form = formidable({ multiples: false, keepExtensions: true, maxFileSize: 100 * 1024 * 1024 });
+    const { buffer } = await new Promise((resolve, reject) => {
       form.parse(req, async (err, fields, files) => {
         if (err) return reject(err);
         const f = files?.file || files?.upload || Object.values(files || {})[0];
         if (!f) return reject(new Error('No file uploaded. Use form field "file".'));
         const fp = f.filepath || f.path;
-        if (!fp) return reject(new Error('Uploaded file path missing (formidable).'));
-        try {
-          const buf = await fsp.readFile(fp);
-          resolve({ buffer: buf, originalFilename: f.originalFilename || f.newFilename || 'upload.xlsx' });
-        } catch (e) {
-          reject(e);
-        }
+        if (!fp) return reject(new Error('Uploaded file path missing.'));
+        try { resolve({ buffer: await fsp.readFile(fp) }); } catch (e) { reject(e); }
       });
     });
-    return { buffer, originalFilename };
+    return { buffer };
   }
-
-  // Otherwise, accept raw binary (e.g., application/octet-stream)
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const buffer = Buffer.concat(chunks);
   if (!buffer.length) throw new Error('Empty body; send multipart "file" or raw XLSX bytes.');
-  return { buffer, originalFilename: 'upload.xlsx' };
+  return { buffer };
 }
 
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
-      res.status(405).json({ error: 'Use POST. Send multipart/form-data (file field "file") or raw XLSX binary.' });
+      res.status(405).json({ error: 'Use POST. Send multipart/form-data (field "file") or raw XLSX binary.' });
       return;
     }
 
     const { buffer } = await getUploadBuffer(req);
     const rows = parseExcelBuffer(buffer);
-    if (!rows || !rows.length) {
+    if (!rows?.length) {
       res.status(400).json({ error: 'Excel has no rows.' });
       return;
     }
@@ -165,41 +203,45 @@ export default async function handler(req, res) {
 
     if (detectHasHeader(rows[0])) {
       headers = rows[0].map(normHdr);
+      headers = dedupeHeaders(headers);          // <<=== prevent overwrite of repeated names
       dataStartIdx = 1;
       if (headers.some(Boolean)) await saveSnapshotHeaders(headers);
     } else {
       headers =
         loadSnapshotHeaders() ||
         (FALLBACK_FROM_ENV.length ? FALLBACK_FROM_ENV.map(normHdr) : null) ||
-        (BUILTIN_FALLBACK.length ? BUILTIN_FALLBACK.map(normHdr) : null);
+        (BUILTIN_FALLBACK.length ? dedupeHeaders(BUILTIN_FALLBACK) : null);
 
       if (!headers) {
         const maxLen = Math.max(...rows.map(r => (Array.isArray(r) ? r.length : 0)));
-        headers = Array.from({ length: maxLen }, (_, i) => `Col${i + 1}`);
+        headers = Array.from({ length: maxLen }, (_, i) => `Col_${i+1}`);
       }
+      // If the fallback contains repeats, also dedupe
+      headers = dedupeHeaders(headers);
       dataStartIdx = 0;
     }
 
+    // Build row objects
     const H = headers.length;
-    const dataRows = rows.slice(dataStartIdx).map(r => alignRow(r, H));
-    const out = dataRows.map(r => {
+    const dataRows = rows.slice(dataStartIdx).map(r => {
+      const rr = Array.isArray(r) ? r.slice(0, H) : Array(H).fill(null);
+      if (rr.length < H) rr.push(...Array(H - rr.length).fill(null));
       const obj = {};
-      for (let i = 0; i < H; i++) obj[headers[i]] = normCell(r[i]);
-      return obj;
+      for (let i = 0; i < H; i++) obj[headers[i]] = rr[i];
+      return normalizeRow(obj);                  // <<=== normalize here
     });
 
     res.status(200).json({
       columns: headers,
-      count: out.length,
-      rows: out
+      count: dataRows.length,
+      rows: dataRows
     });
   } catch (err) {
-    // Common “no parser found” (formidable) → clarify
-    const msg = String(err && err.message || err);
+    const msg = String(err?.message || err);
     if (/no parser found/i.test(msg)) {
       res.status(400).json({
         error: 'no parser found',
-        hint: 'Send multipart/form-data with field "file", or send raw XLSX bytes (application/octet-stream).'
+        hint: 'Send multipart/form-data with field "file" OR raw XLSX bytes (application/octet-stream).'
       });
       return;
     }
