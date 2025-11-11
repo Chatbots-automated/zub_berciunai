@@ -17,7 +17,7 @@ const BUILTIN_FALLBACK = [
   'melzimo data','melzimo laikas','pieno kiekis',
   'melzimo data','melzimo laikas','pieno kiekis',
   'melzimo data','melzimo laikas','pieno kiekis',
-  'dalyvauja pieno gamyboje','apsiversiavo','laktacijos dienos','apseklinimo diena'
+  'dalyvauja pieno gamyboje','apsiversiavo','laktacijos dienos','apseklinimo diena','veislinė vertė'
 ];
 
 const FALLBACK_FROM_ENV = (process.env.GEA_HEADERS || '')
