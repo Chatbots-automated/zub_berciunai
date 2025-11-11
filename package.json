@@ -1,6 +1,8 @@
 {
+  "engines": { "node": ">=18" },
   "dependencies": {
     "formidable": "^3.5.0",
+    "xlsx": "^0.18.5",
     "pdf-parse": "^1.1.1"
   }
 }
