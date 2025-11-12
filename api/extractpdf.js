@@ -4,8 +4,10 @@ const pdfParse = require("pdf-parse");
 // ---------- helpers ----------
 function toISO(d) {
   if (!d) return null;
-  const m1 = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/); // YYYY[-./]MM[-./]DD
-  const m2 = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/); // DD[-./]MM[-./]YYYY (fallback)
+  // Accept YYYY[-./]MM[-./]DD
+  const m1 = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
+  // Accept DD[-./]MM[-./]YYYY
+  const m2 = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
   if (m1) return `${m1[1]}-${m1[2]}-${m1[3]}`;
   if (m2) return `${m2[3]}-${m2[2]}-${m2[1]}`;
   return null;
@@ -25,7 +27,7 @@ function normalizeSex(s) {
 }
 
 /**
- * Parse animals by scanning the raw text from the header down.
+ * Parse animals by scanning raw PDF text from header down.
  */
 function parseAnimalsFromText(text) {
   // Find header region
@@ -51,53 +53,71 @@ function parseAnimalsFromText(text) {
 
   const body = text.slice(startIdx);
 
-  // Sex variants (non-capturing internally)
+  // Sex variants (non-capturing internally; captured once where used)
   const SEX = "(?:Karvė|Karve|Telyčaitė|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)";
-  // Breed: allow letters, digits, spaces, %, /, (), +, &, commas, dots, hyphens, newlines
+
+  // Breed may contain letters, digits, %, /, (), +, &, commas, dots, hyphens, spaces, even newlines
   const BREED_CHARS = `${LIT}0-9%/()&+.,\\-\\s`;
+
+  // Date formats we accept (YMD or DMY)
+  const DATE = String.raw`(?:\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})`;
 
   /**
    * Robust row regex:
-   *  - index + 'Galvijai' + tag
-   *  - junk (name etc.) until the first SEX token → capture that
-   *  - breed (very permissive) up to a date with -, . or /
-   *  - date + optional whitespace + age (+ optional "mėn."/"men.")
-   *  - optional passport
+   *  index + 'Galvijai' + tag
+   *  junk (name etc.) until first SEX token -> capture SEX
+   *  lazy BREED up to a DATE (either format) -> capture BREED
+   *  capture DATE
+   *  optional spaces/newlines
+   *  capture AGE months (digits) with optional "mėn."/"men."
+   *  optional PASSPORT (AF-096882)
    *
-   * Capturing groups:
+   * Groups:
    *   1=index, 2=tag, 3=sex, 4=breed, 5=date, 6=age, 7=passport?
    */
   const rowRe = new RegExp(
-    String.raw`(\d+)` +                           // 1: row index
+    String.raw`(\d+)` +                       // 1: row index
     String.raw`\s*` +
-    String.raw`(?:Galvijai)` +                    // species (not captured)
+    String.raw`(?:Galvijai)` +                // species (not captured)
     String.raw`\s*` +
-    String.raw`(DE\d+|LT\d+)` +                   // 2: tag
-    String.raw`[\s\S]*?` +                        //    name/junk of arbitrary length
-    String.raw`(${SEX})` +                        // 3: sex
+    String.raw`(DE\d+|LT\d+)` +               // 2: tag
+    String.raw`[\s\S]*?` +                    //    (optional name/junk)
+    String.raw`(${SEX})` +                    // 3: sex
     String.raw`\s*` +
-    String.raw`([${BREED_CHARS}]*?)` +            // 4: breed (very permissive)
-    String.raw`(?=\d{4}[-./]\d{2}[-./]\d{2})` +   //     just before date
-    String.raw`(\d{4}[-./]\d{2}[-./]\d{2})` +     // 5: birth date
+    String.raw`([${BREED_CHARS}]*?)` +        // 4: breed (very permissive)
+    String.raw`(?=${DATE})` +                 //     stop just before date
+    String.raw`(${DATE})` +                   // 5: birth date (YMD or DMY)
     String.raw`\s*` +
-    String.raw`(\d+)(?:\s*(?:mėn|men)\.?)?` +     // 6: age months, optional 'mėn.'/'men.'
-    String.raw`(?:\s*([A-Z]{2}-\d+))?`,           // 7: optional passport (AF-096882)
+    String.raw`(\d+)(?:\s*(?:mėn|men)\.?)?` + // 6: age months, optional "mėn."/"men."
+    String.raw`(?:\s*([A-Z]{2}-\d+))?`,       // 7: optional passport
     "gi"
   );
 
   const rows = [];
   let m;
   while ((m = rowRe.exec(body)) !== null) {
-    const [
+    let [
       _,
-      idx,       // 1
-      tag,       // 2
-      sexRaw,    // 3
-      breedRaw,  // 4
-      dateStr,   // 5
-      ageStr,    // 6
-      passport,  // 7
+      idx,
+      tag,
+      sexRaw,
+      breedRaw,
+      dateStr,
+      ageStr,
+      passport,
     ] = m;
+
+    // Fallback: if date/age somehow not captured, rescan local slice
+    if (!dateStr || !ageStr) {
+      const local = body.slice(m.index, Math.min(body.length, rowRe.lastIndex + 100));
+      const dm = local.match(new RegExp(DATE));
+      if (dm) {
+        dateStr = dm[0];
+        const after = local.slice(local.indexOf(dm[0]) + dm[0].length);
+        const am = after.match(/^\s*(\d+)/);
+        if (am) ageStr = am[1];
+      }
+    }
 
     const breed = (breedRaw || "").replace(/\s+/g, " ").trim();
 
