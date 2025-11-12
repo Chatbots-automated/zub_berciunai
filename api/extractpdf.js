@@ -11,55 +11,70 @@ function toISO(d) {
   return null;
 }
 
-// Character class incl. Lithuanian letters (upper+lower)
+// Lithuanian letters
 const LIT = "A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž";
-const WORD = `[${LIT}'’.-]+`;
+const WORD  = `[${LIT}'’.-]+`;
 const WORDS = `[${LIT} '’.-]+`;
+
+// Normalize sex to a canonical label
+function normalizeSex(s) {
+  if (!s) return null;
+  const x = s.toLowerCase();
+  if (x.startsWith("buliu")) return "Bulius";     // Bulius, Buliukas → Bulius
+  if (x.startsWith("karv"))  return "Karvė";      // Karvė/Karve → Karvė
+  if (x.startsWith("tely"))  return "Telyčaitė";  // Telytė/Telyte/Telyčia/Telycia → Telyčaitė
+  // Fallback: capitalize first letter
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
 
 /**
  * Parse animals by scanning the raw text from the header down with a global regex.
- * Rows in the PDF often have *no spaces* between columns, e.g.:
- *   1GalvijaiDE000123...KarvėHolšteinai2018-05-2189
+ * Rows often have no spaces between columns.
  */
 function parseAnimalsFromText(text) {
-  // Find header line position in the raw text (not normalized)
+  // Find header region
   const headerPattern = /Eil\.\s*Nr\.[\s\S]*?Gimimo\s*data/i;
   const headerMatch = text.match(headerPattern);
   const startIdx = headerMatch ? text.indexOf(headerMatch[0]) : -1;
 
-  // Derive a "preview lines" like before, for easier debugging
-  const allLines = text.split(/\r?\n/).map((s) => s.replace(/\s+/g, " ").trim()).filter(Boolean);
-  const headerIdx = allLines.findIndex((l) =>
-    /Eil\.\s*Nr\./i.test(l) && /(Rūšis|Rusis)/i.test(l) && /Gimimo\s*data/i.test(l)
+  const allLines = text
+    .split(/\r?\n/)
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  const headerIdx = allLines.findIndex(
+    (l) => /Eil\.\s*Nr\./i.test(l) && /(Rūšis|Rusis)/i.test(l) && /Gimimo\s*data/i.test(l)
   );
 
   if (startIdx === -1 || headerIdx === -1) {
     return {
       rows: [],
-      debug: { headerIdx, totalLines: allLines.length, startIdx, foundHeader: false }
+      debug: { headerIdx, totalLines: allLines.length, startIdx, foundHeader: false },
     };
   }
 
-  const body = text.slice(startIdx); // scan from header onwards
+  const body = text.slice(startIdx);
 
-  // Global regex:
-  //  index   species    tag                       (optional name)   sex                               breed              date           age     (optional passport)
+  // Sex variants (diacritics + ASCII fallbacks)
+  // Karvė/Karve, Telyčaitė/Telytė/Telyte/Telyčia/Telycia, Bulius/Buliukas
+  const SEX = "(Karvė|Karve|Telyčaitė|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)";
+
+  //                           1    2           3 (tag)         4 name?         5 sex        6 breed          7 date            8 age    9 passport?
   const rowRe = new RegExp(
     String.raw`(\d+)` +                 // 1: row index
     String.raw`\s*` +
-    String.raw`(Galvijai)` +            // 2: species text (in these PDFs always "Galvijai")
+    String.raw`(Galvijai)` +            // 2: species (in these PDFs it's "Galvijai")
     String.raw`\s*` +
     String.raw`(DE\d+|LT\d+)` +         // 3: tag (DE..., LT...)
     String.raw`\s*` +
-    String.raw`(?:(${WORD})\s*)?` +     // 4: optional name (single token if present; usually absent)
-    String.raw`(Karvė|Telyčaitė|Bulius|Telyciaite|Telyčia|Telycia)` + // 5: sex (variants)
+    String.raw`(?:(${WORD})\s*)?` +     // 4: optional name (single token)
+    String.raw`${SEX}` +                // 5: sex (with variants)
     String.raw`\s*` +
-    String.raw`(${WORDS}?)` +           // 6: breed (lazy; we’ll trim later)
-    String.raw`(\d{4}-\d{2}-\d{2})` +   // 7: date (anchors the end of breed)
-    String.raw`(\d+)` +                 // 8: age (often glued right after the date)
-    String.raw`(?:\s*([A-Z]{2}-\d+))?` +// 9: optional passport (e.g., AF-096882)
-    String.raw``,
-    "g"
+    String.raw`(${WORDS}?)` +           // 6: breed (optional, greedy until date)
+    String.raw`(\d{4}-\d{2}-\d{2})` +   // 7: birth date
+    String.raw`(\d+)` +                 // 8: age in months glued to date
+    String.raw`(?:\s*([A-Z]{2}-\d+))?`, // 9: optional passport (e.g., AF-096882)
+    "gi" // global + case-insensitive
   );
 
   const rows = [];
@@ -78,7 +93,6 @@ function parseAnimalsFromText(text) {
       passport,
     ] = m;
 
-    // Clean breed (it may include trailing spaces)
     const breed = (breedRaw || "").trim();
 
     rows.push({
@@ -86,7 +100,7 @@ function parseAnimalsFromText(text) {
       species: speciesText.toLowerCase(),
       tag_no: tag,
       name: nameMaybe || null,
-      sex: sexRaw ? sexRaw.charAt(0).toUpperCase() + sexRaw.slice(1).toLowerCase() : null,
+      sex: normalizeSex(sexRaw || null),
       breed: breed || null,
       birth_date: toISO(dateStr),
       age_months: ageStr ? Number(ageStr) : null,
@@ -153,22 +167,11 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    console.log("[extractpdf] content-type:", ct);
-    console.log("[extractpdf] buffer bytes:", pdfBuffer ? pdfBuffer.length : 0);
-
     const parsed = await pdfParse(pdfBuffer);
-    console.log("[extractpdf] text length:", parsed.text ? parsed.text.length : 0);
-
     const { rows, debug } = parseAnimalsFromText(parsed.text || "");
-    console.log("[extractpdf] headerIdx:", debug.headerIdx, "startIdx:", debug.startIdx, "totalLines:", debug.totalLines);
-    console.log("[extractpdf] matched rows:", debug.matched);
 
     res.setHeader("Cache-Control", "no-store");
-    res.status(200).json({
-      count: rows.length,
-      animals: rows,
-      debug,
-    });
+    res.status(200).json({ count: rows.length, animals: rows, debug });
   } catch (e) {
     console.error("[extractpdf] ERROR:", e);
     res.status(500).json({ error: e?.message || "parse_error" });
