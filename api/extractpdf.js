@@ -4,8 +4,8 @@ const pdfParse = require("pdf-parse");
 // ---------- helpers ----------
 function toISO(d) {
   if (!d) return null;
-  const m1 = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
-  const m2 = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
+  const m1 = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/); // YYYY[-./]MM[-./]DD
+  const m2 = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/); // DD[-./]MM[-./]YYYY (fallback)
   if (m1) return `${m1[1]}-${m1[2]}-${m1[3]}`;
   if (m2) return `${m2[3]}-${m2[2]}-${m2[1]}`;
   return null;
@@ -18,7 +18,7 @@ const LIT = "A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž";
 function normalizeSex(s) {
   if (!s) return null;
   const x = s.toLowerCase();
-  if (x.startsWith("buliu")) return "Bulius";     // Bulius, Buliukas → Bulius (change if you want to keep 'Buliukas')
+  if (x.startsWith("buliu")) return "Bulius";     // Bulius, Buliukas → Bulius
   if (x.startsWith("karv"))  return "Karvė";      // Karvė/Karve → Karvė
   if (x.startsWith("tely"))  return "Telyčaitė";  // Telytė/Telyte/Telyčia/Telycia → Telyčaitė
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
@@ -28,7 +28,7 @@ function normalizeSex(s) {
  * Parse animals by scanning the raw text from the header down.
  */
 function parseAnimalsFromText(text) {
-  // Find header region (work on raw text for glued columns)
+  // Find header region
   const headerPattern = /Eil\.\s*Nr\.[\s\S]*?Gimimo\s*data/i;
   const headerMatch = text.match(headerPattern);
   const startIdx = headerMatch ? text.indexOf(headerMatch[0]) : -1;
@@ -51,32 +51,37 @@ function parseAnimalsFromText(text) {
 
   const body = text.slice(startIdx);
 
-  // Sex variants (diacritics + ASCII fallbacks)
-  const SEX = "(Karvė|Karve|Telyčaitė|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)";
-  // Breed can contain letters, digits, spaces, %, /, (), +, &, commas, dots, hyphens, and even newlines.
+  // Sex variants (non-capturing internally)
+  const SEX = "(?:Karvė|Karve|Telyčaitė|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)";
+  // Breed: allow letters, digits, spaces, %, /, (), +, &, commas, dots, hyphens, newlines
   const BREED_CHARS = `${LIT}0-9%/()&+.,\\-\\s`;
 
   /**
-   * Ultra-robust row regex:
-   * - Index + 'Galvijai' + Tag
-   * - Then: ANYTHING (name, junk) lazily until the first SEX token → capture that SEX
-   * - Then: BREED lazily until an ISO date → capture that BREED
-   * - Then: DATE + AGE + optional PASSPORT
+   * Robust row regex:
+   *  - index + 'Galvijai' + tag
+   *  - junk (name etc.) until the first SEX token → capture that
+   *  - breed (very permissive) up to a date with -, . or /
+   *  - date + optional whitespace + age (+ optional "mėn."/"men.")
+   *  - optional passport
+   *
+   * Capturing groups:
+   *   1=index, 2=tag, 3=sex, 4=breed, 5=date, 6=age, 7=passport?
    */
   const rowRe = new RegExp(
     String.raw`(\d+)` +                           // 1: row index
     String.raw`\s*` +
-    String.raw`(Galvijai)` +                      // 2: species text
+    String.raw`(?:Galvijai)` +                    // species (not captured)
     String.raw`\s*` +
-    String.raw`(DE\d+|LT\d+)` +                   // 3: tag
-    String.raw`[\s\S]*?` +                        //    (optional name/junk of arbitrary length)
-    String.raw`(${SEX})` +                        // 4: sex token (first one after tag)
+    String.raw`(DE\d+|LT\d+)` +                   // 2: tag
+    String.raw`[\s\S]*?` +                        //    name/junk of arbitrary length
+    String.raw`(${SEX})` +                        // 3: sex
     String.raw`\s*` +
-    String.raw`([${BREED_CHARS}]*?)` +            // 5: breed (very permissive)
-    String.raw`(?=\d{4}-\d{2}-\d{2})` +           //     stop right before date
-    String.raw`(\d{4}-\d{2}-\d{2})` +             // 6: birth date
-    String.raw`(\d+)` +                           // 7: age in months glued to date
-    String.raw`(?:\s*([A-Z]{2}-\d+))?`,           // 8: optional passport like AF-096882
+    String.raw`([${BREED_CHARS}]*?)` +            // 4: breed (very permissive)
+    String.raw`(?=\d{4}[-./]\d{2}[-./]\d{2})` +   //     just before date
+    String.raw`(\d{4}[-./]\d{2}[-./]\d{2})` +     // 5: birth date
+    String.raw`\s*` +
+    String.raw`(\d+)(?:\s*(?:mėn|men)\.?)?` +     // 6: age months, optional 'mėn.'/'men.'
+    String.raw`(?:\s*([A-Z]{2}-\d+))?`,           // 7: optional passport (AF-096882)
     "gi"
   );
 
@@ -85,23 +90,22 @@ function parseAnimalsFromText(text) {
   while ((m = rowRe.exec(body)) !== null) {
     const [
       _,
-      idx,
-      speciesText,
-      tag,
-      sexRaw,     // group 4 (already matched by SEX)
-      breedRaw,   // group 5
-      dateStr,    // group 6
-      ageStr,     // group 7
-      passport,   // group 8
+      idx,       // 1
+      tag,       // 2
+      sexRaw,    // 3
+      breedRaw,  // 4
+      dateStr,   // 5
+      ageStr,    // 6
+      passport,  // 7
     ] = m;
 
     const breed = (breedRaw || "").replace(/\s+/g, " ").trim();
 
     rows.push({
       row_index: Number(idx),
-      species: (speciesText || "").toLowerCase(),
+      species: "galvijai",
       tag_no: tag,
-      name: null, // name is intentionally skipped in this robust parser
+      name: null, // intentionally omitted
       sex: normalizeSex(sexRaw || null),
       breed: breed || null,
       birth_date: toISO(dateStr),
