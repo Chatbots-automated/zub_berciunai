@@ -1,38 +1,28 @@
-
-
 // api/extractpdf.js
 const pdfParse = require("pdf-parse");
 
 // ---------- helpers ----------
 function toISO(d) {
   if (!d) return null;
-  const m1 = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
-  const m2 = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
-  if (m1) return `${m1[1]}-${m1[2]}-${m1[3]}`;
-  if (m2) return `${m2[3]}-${m2[2]}-${m2[1]}`;
+  // YYYY[-./]MM[-./]DD
+  let m = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  // DD[-./]MM[-./]YYYY
+  m = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
   return null;
 }
 
-// Lithuanian letters
-const LIT = "A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž";
-const WORD  = `[${LIT}'’.-]+`;
-const WORDS = `[${LIT} '’.-]+`;
-
-// Normalize sex to a canonical label
 function normalizeSex(s) {
   if (!s) return null;
   const x = s.toLowerCase();
-  if (x.startsWith("buliu")) return "Bulius";     // Bulius, Buliukas → Bulius
+  if (x.startsWith("buliu")) return "Bulius";     // Bulius, Buliukas → Bulius (tweak if you want to keep Buliukas)
   if (x.startsWith("karv"))  return "Karvė";      // Karvė/Karve → Karvė
   if (x.startsWith("tely"))  return "Telyčaitė";  // Telytė/Telyte/Telyčia/Telycia → Telyčaitė
-  // Fallback: capitalize first letter
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
 }
 
-/**
- * Parse animals by scanning the raw text from the header down with a global regex.
- * Rows often have no spaces between columns.
- */
+// ---------- core parser ----------
 function parseAnimalsFromText(text) {
   // Find header region
   const headerPattern = /Eil\.\s*Nr\.[\s\S]*?Gimimo\s*data/i;
@@ -57,60 +47,90 @@ function parseAnimalsFromText(text) {
 
   const body = text.slice(startIdx);
 
-  // Sex variants (diacritics + ASCII fallbacks)
-  // Karvė/Karve, Telyčaitė/Telytė/Telyte/Telyčia/Telycia, Bulius/Buliukas
-  const SEX = "(Karvė|Karve|Telyčaitė|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)";
+  // Row head: index + 'Galvijai' + tag
+  const headRe = /(\d+)\s*Galvijai\s*(DE\d+|LT\d+)/gi;
 
-  //                           1    2           3 (tag)         4 name?         5 sex        6 breed          7 date            8 age    9 passport?
-  const rowRe = new RegExp(
-    String.raw`(\d+)` +                 // 1: row index
-    String.raw`\s*` +
-    String.raw`(Galvijai)` +            // 2: species (in these PDFs it's "Galvijai")
-    String.raw`\s*` +
-    String.raw`(DE\d+|LT\d+)` +         // 3: tag (DE..., LT...)
-    String.raw`\s*` +
-    String.raw`(?:(${WORD})\s*)?` +     // 4: optional name (single token)
-    String.raw`${SEX}` +                // 5: sex (with variants)
-    String.raw`\s*` +
-    String.raw`(${WORDS}?)` +           // 6: breed (optional, greedy until date)
-    String.raw`(\d{4}-\d{2}-\d{2})` +   // 7: birth date
-    String.raw`(\d+)` +                 // 8: age in months glued to date
-    String.raw`(?:\s*([A-Z]{2}-\d+))?`, // 9: optional passport (e.g., AF-096882)
-    "gi" // global + case-insensitive
-  );
+  // Tokens/patterns inside a row slice
+  const SEX_RE = /\b(Karvė|Karve|Telyčaitė|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)\b/i;
+  const DATE_RE = /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})/; // first match after sex
+  const AGE_RE  = /^\s*(\d+)(?:\s*(?:mėn|men)\.?)?/i;
+  const PASS_RE = /[A-Z]{2}-\d+/;
+
+  // Build segments between row heads
+  const segments = [];
+  let m;
+  while ((m = headRe.exec(body)) !== null) {
+    const idx = Number(m[1]);
+    const tag = m[2];
+    const start = m.index + m[0].length;
+    segments.push({ idx, tag, start });
+  }
+  // Add end boundaries
+  for (let i = 0; i < segments.length; i++) {
+    segments[i].end = (i + 1 < segments.length) ? segments[i + 1].start - (segments[i + 1].tag.length + 0) : body.length;
+  }
 
   const rows = [];
-  let m;
-  while ((m = rowRe.exec(body)) !== null) {
-    const [
-      _,
-      idx,
-      speciesText,
-      tag,
-      nameMaybe,
-      sexRaw,
-      breedRaw,
-      dateStr,
-      ageStr,
-      passport,
-    ] = m;
+  for (let i = 0; i < segments.length; i++) {
+    const { idx, tag, start, end } = segments[i];
+    // Safer end: up to next head match index
+    const nextHead = (function () {
+      const m2 = headRe.exec(body); // headRe lastIndex is at end; reset and find next from this segment's start
+      return null;
+    })();
+    const segEnd = (i + 1 < segments.length) ? segments[i + 1].start - (0) : end; // keep earlier computed end
+    const slice = body.slice(start, segEnd);
 
-    const breed = (breedRaw || "").trim();
+    // 1) Sex (anchor)
+    const sexMatch = slice.match(SEX_RE);
+    if (!sexMatch) {
+      // If sex missing, we still try to find date/age and leave sex null
+    }
+    const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
+    const afterSexIdx = sexMatch ? (sexMatch.index + sexMatch[0].length) : 0;
+    const afterSex = slice.slice(afterSexIdx);
+
+    // 2) Date (first date after sex)
+    const dateMatch = afterSex.match(DATE_RE) || slice.match(DATE_RE);
+    const dateStrRaw = dateMatch ? dateMatch[0] : null;
+    const dateISO = toISO(dateStrRaw);
+
+    // 3) Age (digits right after found date)
+    let ageMonths = null;
+    if (dateMatch) {
+      const afterDate = afterSex.slice(afterSex.indexOf(dateMatch[0]) + dateMatch[0].length);
+      const ageMatch = afterDate.match(AGE_RE);
+      if (ageMatch) ageMonths = Number(ageMatch[1]);
+    }
+
+    // 4) Breed (between sex and date)
+    let breedRaw = null;
+    if (sexMatch && dateMatch) {
+      const breedRegion = afterSex.slice(0, afterSex.indexOf(dateMatch[0]));
+      breedRaw = breedRegion.replace(/\s+/g, " ").trim();
+    } else if (sexMatch) {
+      // If date not found, take some reasonable chunk after sex as breed
+      breedRaw = afterSex.replace(/\s+/g, " ").trim();
+    }
+
+    // 5) Passport (anywhere in slice)
+    const passMatch = slice.match(PASS_RE);
+    const passport = passMatch ? passMatch[0] : null;
 
     rows.push({
-      row_index: Number(idx),
-      species: speciesText.toLowerCase(),
+      row_index: idx,
+      species: "galvijai",
       tag_no: tag,
-      name: nameMaybe || null,
-      sex: normalizeSex(sexRaw || null),
-      breed: breed || null,
-      birth_date: toISO(dateStr),
-      age_months: ageStr ? Number(ageStr) : null,
-      passport: passport || null,
+      name: null,
+      sex: sex,
+      breed: breedRaw || null,
+      birth_date: dateISO,
+      age_months: Number.isFinite(ageMonths) ? ageMonths : null,
+      passport: passport,
     });
   }
 
-  // Dedup by tag
+  // Dedup by tag (keep first)
   const seen = new Set();
   const unique = rows.filter((r) => !seen.has(r.tag_no) && seen.add(r.tag_no));
 
@@ -121,7 +141,6 @@ function parseAnimalsFromText(text) {
       totalLines: allLines.length,
       startIdx,
       foundHeader: true,
-      previewAroundHeader: allLines.slice(Math.max(0, headerIdx - 2), headerIdx + 8),
       matched: unique.length,
     },
   };
