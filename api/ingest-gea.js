@@ -10,7 +10,7 @@ export const config = {
 
 const SNAPSHOT_PATH = '/tmp/gea_headers.json';
 
-// ---- Built-in fallback (now includes Y/Z before AA) ----
+// ---- Built-in fallback (now includes AB: 'kada versiuosis') ----
 const BUILTIN_FALLBACK = [
   'karves nr','kaklo nr','statusas','grupe','pieno vidurkis',
   'melzimo data','melzimo laikas','pieno kiekis',
@@ -19,7 +19,8 @@ const BUILTIN_FALLBACK = [
   'melzimo data','melzimo laikas','pieno kiekis',
   'melzimo data','melzimo laikas','pieno kiekis',
   'dalyvauja pieno gamyboje','apsiversiavo','laktacijos dienos','apseklinimo diena',
-  'liko iki apsiveršiavimo','veršingumas dienomis','veislinė vertė' // Y, Z, AA
+  'liko iki apsiveršiavimo','veršingumas dienomis','veislinė vertė',
+  'kada versiuosis' // <-- AB
 ];
 
 // ENV fallback (highest priority when present)
@@ -81,16 +82,16 @@ function toISODate(val) {
   const s = String(val).trim();
   if (!s) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  let m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);           //  DD.MM.YYYY
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);         //  M/D/YY(YY)
   if (m) {
     const mm = String(m[1]).padStart(2,'0');
     const dd = String(m[2]).padStart(2,'0');
     const yy = m[3].length === 2 ? `20${m[3]}` : m[3];
     return `${yy}-${mm}-${dd}`;
   }
-  return s;
+  return null;
 }
 function toTime(val) {
   if (val == null) return null;
@@ -106,16 +107,12 @@ function toTime(val) {
 function toNum(val) {
   if (val == null) return null;
   if (typeof val === 'number' && Number.isFinite(val)) return val;
-  // handle 1 234,56  or 1.234,56  or 1,234.56
   let s = String(val).trim().replace(/\u00A0/g, ' ').replace(/\s+/g, '');
-  // if it has both '.' and ',' decide decimal by last separator
   const lastComma = s.lastIndexOf(',');
   const lastDot = s.lastIndexOf('.');
   if (lastComma > lastDot) {
-    // comma-decimal → remove dots (thousands), replace comma with dot
     s = s.replace(/\./g, '').replace(',', '.');
   } else {
-    // dot-decimal → remove commas (thousands)
     s = s.replace(/,/g, '');
   }
   const n = Number(s);
@@ -140,11 +137,18 @@ function normalizeRow(obj) {
   for (const k of Object.keys(out)) {
     const lk = k.toLowerCase();
     if (lk.includes('data') || lk === 'apsiversiavo' || lk === 'apseklinimo diena') {
-      out[k] = toISODate(out[k]);
+      const iso = toISODate(out[k]);
+      out[k] = iso ?? out[k]; // date if we can, else keep original
     }
     if (lk.includes('laikas')) {
       out[k] = toTime(out[k]);
     }
+  }
+
+  // NEW: normalize 'kada versiuosis' softly to ISO date if it looks like a date; else keep text
+  if ('kada versiuosis' in out) {
+    const iso = toISODate(out['kada versiuosis']);
+    out['kada versiuosis'] = iso ?? (out['kada versiuosis'] == null ? null : String(out['kada versiuosis']).trim());
   }
 
   // booleans
@@ -152,7 +156,7 @@ function normalizeRow(obj) {
     out['dalyvauja pieno gamyboje'] = toBoolLT(out['dalyvauja pieno gamyboje']);
   }
 
-  // numbers (now also includes Y/Z + AA)
+  // numbers
   const numericKeys = [
     'pieno vidurkis',
     'pieno kiekis','pieno kiekis_2','pieno kiekis_3','pieno kiekis_4','pieno kiekis_5',
@@ -225,6 +229,13 @@ export default async function handler(req, res) {
       headers = dedupeHeaders(headers);
       dataStartIdx = 1;
       if (headers.some(Boolean)) await saveSnapshotHeaders(headers);
+
+      // 🔧 If AB header is blank but data has one extra cell, append 'kada versiuosis'
+      const maxCols = Math.max(...rows.slice(dataStartIdx).map(r => (Array.isArray(r) ? r.length : 0)));
+      const lower = headers.map(h => h.toLowerCase());
+      if (maxCols > headers.length && maxCols === headers.length + 1 && !lower.includes('kada versiuosis')) {
+        headers.push('kada versiuosis');
+      }
     } else {
       const snap = loadSnapshotHeaders();
       const envHdrs = FALLBACK_FROM_ENV.length ? FALLBACK_FROM_ENV.map(normHdr) : null;
@@ -238,7 +249,7 @@ export default async function handler(req, res) {
         pref = Array.from({ length: maxLen }, (_, i) => `Col_${i+1}`);
       }
 
-      // Merge if ENV longer than snapshot (e.g., adds Y/Z/AA)
+      // Merge if ENV longer than snapshot/builtin
       if (snap && envHdrs && envHdrs.length > snap.length) {
         const set = new Set(pref);
         for (const h of envHdrs) if (!set.has(h)) { pref.push(h); set.add(h); }
@@ -246,18 +257,19 @@ export default async function handler(req, res) {
 
       headers = dedupeHeaders(pref);
       dataStartIdx = 0;
+
+      // If the sheet still has more cells than fallback headers by exactly one, assume it's AB→'kada versiuosis'
+      const maxCols = Math.max(...rows.slice(dataStartIdx).map(r => (Array.isArray(r) ? r.length : 0)));
+      const lower = headers.map(h => h.toLowerCase());
+      if (maxCols > headers.length && maxCols === headers.length + 1 && !lower.includes('kada versiuosis')) {
+        headers.push('kada versiuosis');
+      }
     }
 
     // Build normalized objects
     const H = headers.length;
     const dataRows = rows.slice(dataStartIdx).map(r => {
       const rr = Array.isArray(r) ? r.slice() : [];
-
-      // --- Guard: if sheet has more cells than headers and last header is "veislinė vertė",
-      // map the LAST physical cell into that header to keep alignment with AA.
-      if (rr.length > H && headers[H - 1] === 'veislinė vertė') {
-        rr[H - 1] = rr[rr.length - 1];
-      }
 
       // Resize to H (pad or truncate)
       if (rr.length < H) rr.push(...Array(H - rr.length).fill(null));
