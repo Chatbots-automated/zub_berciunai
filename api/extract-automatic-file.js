@@ -9,24 +9,65 @@ export const config = {
 
 // ---------- column definitions ----------
 const AT1_COLS = [
-  "cow_number",                 // A
-  "ear_number",                 // B
-  "cow_state",                  // C
-  "group_number",               // D
-  "pregnant_since",             // E
-  "lactation_days",             // F
-  "inseminated_at",             // G
-  "pregnant_days",              // H
-  "next_pregnancy_date",        // I
-  "days_until_waiting_pregnancy"// J
+  "cow_number",
+  "ear_number",
+  "cow_state",
+  "group_number",
+  "pregnant_since",
+  "lactation_days",
+  "inseminated_at",
+  "pregnant_days",
+  "next_pregnancy_date",
+  "days_until_waiting_pregnancy",
 ];
 
-// A..AJ (total 35 columns)
-const AT2_COLS = [
+// ---- AT2 schemas ----
+// (A..AJ) WITHOUT the mysterious D column
+const AT2_COLS_NO_D = [
   "cow_number",            // A
   "genetic_worth",         // B
   "blood_line",            // C
-  "avg_milk_prod_weight",  // E (but in the file it's the 4th column position)
+  "avg_milk_prod_weight",  // D (in this schema)
+  "produce_milk",          // E
+  "last_milking_date",     // F
+  "last_milking_time",     // G
+  "last_milking_weight",   // H
+  "milking_date_1",        // I
+  "milking_time_1",        // J
+  "milking_weight_1",      // K
+  "milking_date_2",        // L
+  "milking_time_2",        // M
+  "milking_weight_2",      // N
+  "milking_date_3",        // O
+  "milking_time_3",        // P
+  "milking_weight_3",      // Q
+  "milking_date_4",        // R
+  "milking_time_4",        // S
+  "milking_weight_4",      // T
+  "milking_date_5",        // U
+  "milking_time_5",        // V
+  "milking_weight_5",      // W
+  "milking_date_6",        // X
+  "milking_time_6",        // Y
+  "milking_weight_6",      // Z
+  "milking_date_7",        // AA
+  "milking_time_7",        // AB
+  "milking_weight_7",      // AC
+  "milking_date_8",        // AD
+  "milking_time_8",        // AE
+  "milking_weight_8",      // AF
+  "milking_date_9",        // AG
+  "milking_time_9",        // AH
+  "milking_weight_9",      // AI
+];
+
+// WITH the extra blank “D” column after blood_line (this is your file)
+const AT2_COLS_WITH_D = [
+  "cow_number",            // A
+  "genetic_worth",         // B
+  "blood_line",            // C
+  "unused_d",              // D (blank / unused)
+  "avg_milk_prod_weight",  // E
   "produce_milk",          // F (Taip/Ne)
   "last_milking_date",     // G
   "last_milking_time",     // H
@@ -61,16 +102,16 @@ const AT2_COLS = [
 ];
 
 const AT3_COLS = [
-  "cow_number",             // A
-  "teat_missing_right_back",// B
-  "teat_missing_back_left", // C
-  "teat_missing_front_left",// D
-  "teat_missing_front_right",// E
-  "insemination_count",     // F
-  "bull_1",                 // G
-  "bull_2",                 // H
-  "bull_3",                 // I
-  "lactation_number"        // J
+  "cow_number",
+  "teat_missing_right_back",
+  "teat_missing_back_left",
+  "teat_missing_front_left",
+  "teat_missing_front_right",
+  "insemination_count",
+  "bull_1",
+  "bull_2",
+  "bull_3",
+  "lactation_number",
 ];
 
 // ---------- helpers ----------
@@ -97,18 +138,13 @@ function findMarkerIndex(rows, marker) {
 }
 
 function cleanSectionRows(sectionRows) {
-  // Remove leading empties (your “4 blank rows” tendency)
   let start = 0;
   while (start < sectionRows.length && isRowEmpty(sectionRows[start])) start++;
 
-  // Remove trailing empties
   let end = sectionRows.length - 1;
   while (end >= start && isRowEmpty(sectionRows[end])) end--;
 
-  const trimmed = sectionRows.slice(start, end + 1);
-
-  // Remove fully empty rows inside too
-  return trimmed.filter((r) => !isRowEmpty(r));
+  return sectionRows.slice(start, end + 1).filter((r) => !isRowEmpty(r));
 }
 
 function mapRowsToObjects(rows, cols) {
@@ -126,7 +162,6 @@ function mapRowsToObjects(rows, cols) {
 function parseExcelBuffer(buf) {
   const wb = read(buf, { type: "buffer", cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
-  // IMPORTANT: blankrows:true keeps structure so markers/empties are reliable
   return utils.sheet_to_json(ws, {
     header: 1,
     raw: false,
@@ -148,11 +183,7 @@ async function getUploadBuffer(req) {
     const { buffer } = await new Promise((resolve, reject) => {
       form.parse(req, async (err, fields, files) => {
         if (err) return reject(err);
-        const f =
-          files?.file ||
-          files?.upload ||
-          (files && Object.values(files)[0]);
-
+        const f = files?.file || files?.upload || (files && Object.values(files)[0]);
         if (!f) return reject(new Error('No file uploaded. Use form field "file".'));
 
         const fp = f.filepath || f.path;
@@ -169,12 +200,40 @@ async function getUploadBuffer(req) {
     return buffer;
   }
 
-  // raw body
   const chunks = [];
   for await (const ch of req) chunks.push(ch);
   const buffer = Buffer.concat(chunks);
   if (!buffer.length) throw new Error('Empty body. Send multipart "file" or raw Excel bytes.');
   return buffer;
+}
+
+// --- Heuristic: decide AT2 schema ---
+function pickAt2Schema(sec2) {
+  const first = sec2.find(r => Array.isArray(r) && r.some(v => String(v ?? "").trim() !== ""));
+  if (!first) return AT2_COLS_WITH_D; // default to WITH_D (your case)
+
+  const cell = (i) => String(first[i] ?? "").trim();
+
+  const looksBoolLT = (s) => {
+    const v = s.toLowerCase();
+    return v === "taip" || v === "ne";
+  };
+  const looksDate = (s) => /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s) || /^\d{4}-\d{2}-\d{2}$/.test(s) || /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(s);
+  const looksTime = (s) => /^\d{1,2}:\d{2}$/.test(s);
+  const looksNumber = (s) => s !== "" && !isNaN(Number(String(s).replace(",", ".")));
+
+  // WITH_D layout expects:
+  // [0 cow,1 genetic,2 blood,3 blank/unused,4 avgNum,5 Taip/Ne,6 date,7 time,8 weightNum, 9 date...]
+  const dBlank = cell(3) === "" || cell(3).toLowerCase() === "null";
+  const avgOk  = looksNumber(cell(4));
+  const boolOk = looksBoolLT(cell(5));
+  const dateOk = looksDate(cell(6));
+  const timeOk = looksTime(cell(7));
+
+  if (dBlank && avgOk && boolOk && dateOk && timeOk) return AT2_COLS_WITH_D;
+
+  // Otherwise try NO_D
+  return AT2_COLS_NO_D;
 }
 
 // ---------- main handler ----------
@@ -191,7 +250,6 @@ export default async function handler(req, res) {
     const rows = parseExcelBuffer(buffer);
     if (!rows || !rows.length) return res.status(400).json({ error: "Excel has no rows." });
 
-    // Find markers
     const i1 = findMarkerIndex(rows, "1 ATASKAITA");
     const i2 = findMarkerIndex(rows, "2 ATASKAITA");
     const i3 = findMarkerIndex(rows, "3 ATASKAITA");
@@ -203,19 +261,21 @@ export default async function handler(req, res) {
       });
     }
 
-    // Slice sections (everything after marker row until next marker)
     const sec1 = cleanSectionRows(rows.slice(i1 + 1, i2));
     const sec2 = cleanSectionRows(rows.slice(i2 + 1, i3));
     const sec3 = cleanSectionRows(rows.slice(i3 + 1));
 
-    // Map to objects with fixed columns
     const ataskaita1 = mapRowsToObjects(sec1, AT1_COLS);
-    const ataskaita2 = mapRowsToObjects(sec2, AT2_COLS);
+
+    const at2Cols = pickAt2Schema(sec2);
+    const ataskaita2 = mapRowsToObjects(sec2, at2Cols);
+
     const ataskaita3 = mapRowsToObjects(sec3, AT3_COLS);
 
     return res.status(200).json({
       meta: {
         markers: { i1, i2, i3 },
+        at2_schema: at2Cols === AT2_COLS_WITH_D ? "WITH_D" : "NO_D",
         counts: {
           ataskaita1: ataskaita1.length,
           ataskaita2: ataskaita2.length,
