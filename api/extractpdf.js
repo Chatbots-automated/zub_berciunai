@@ -17,8 +17,8 @@ function toISO(d) {
 function normalizeText(s) {
   return String(s || "")
     .replace(/\u00A0/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\r/g, "\n");
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ");
 }
 
 function normalizeOneLine(s) {
@@ -69,7 +69,7 @@ function normalizeSex(s) {
   if (x.startsWith("kumel")) return "Kumelė";
   if (x.startsWith("kastr")) return "Kastratas";
 
-  // Other animals, future support
+  // Other animals
   if (x.startsWith("avinas")) return "Avinas";
   if (x.startsWith("avis")) return "Avis";
   if (x.startsWith("ėriuk") || x.startsWith("eriuk")) return "Ėriukas";
@@ -184,32 +184,6 @@ function splitSexFromBreedIfNeeded(row) {
   return row;
 }
 
-function truncateRowSlice(s) {
-  if (!s) return "";
-
-  const raw = String(s);
-
-  const stops = [
-    /www\.zudc\.lt/i,
-    /Gyvų gyvūnų sąrašas/i,
-    /Sugrupuota\s+statistika/i,
-    /Iš\s+viso\s+ataskaitoje/i,
-    /Iš\s+viso\s+registruota\s+grupėmis/i,
-    /Deklaruota\s+gyvūnų/i,
-    /\n\s*\d+\.\s+Laikytojas/i,
-    /Eil\.\s*Nr\.\s*Rūšis\s*Grupė\s*Gyvūnų\s*skaičius/i,
-  ];
-
-  let cut = raw.length;
-
-  for (const re of stops) {
-    const idx = raw.search(re);
-    if (idx !== -1 && idx < cut) cut = idx;
-  }
-
-  return raw.slice(0, cut);
-}
-
 function isLikelyIndividualSpecies(speciesRaw) {
   const s = normalizeLithuanianSpecies(speciesRaw);
 
@@ -223,7 +197,19 @@ function isLikelyIndividualSpecies(speciesRaw) {
   ].includes(s);
 }
 
-// ---------- header / section helpers ----------
+function shouldStopLine(line) {
+  return (
+    /www\.zudc\.lt/i.test(line) ||
+    /Gyvų gyvūnų sąrašas/i.test(line) ||
+    /Sugrupuota\s+statistika/i.test(line) ||
+    /Iš\s+viso\s+ataskaitoje/i.test(line) ||
+    /Iš\s+viso\s+registruota\s+grupėmis/i.test(line) ||
+    /Deklaruota\s+gyvūnų/i.test(line) ||
+    /^\d+\.\s+Laikytojas/i.test(line) ||
+    /Eil\.\s*Nr\./i.test(line)
+  );
+}
+
 function getHeaderDebug(originalText) {
   const text = normalizeText(originalText);
 
@@ -251,74 +237,25 @@ function getHeaderDebug(originalText) {
   };
 }
 
-// ---------- individual animal parser ----------
-function parseIndividualAnimalsFromText(originalText) {
-  const text = normalizeText(originalText || "");
+// ---------- row parsing ----------
+function parseIndividualRowSegment(segment) {
+  const cleanSegment = normalizeBreedSpacing(normalizeOneLine(segment));
 
-  const { allLines, headerIdx, startIdx, foundHeader } = getHeaderDebug(text);
+  const rowStartRe =
+    /^(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+((?:[A-Z]{2,3}\d+|\d{8,20}))\s*(.*)$/u;
 
-  if (!foundHeader) {
-    return {
-      rows: [],
-      debug: {
-        headerIdx,
-        totalLines: allLines.length,
-        startIdx,
-        foundHeader: false,
-        rawHeadsFound: 0,
-        rawHeadsFoundNormalized: 0,
-      },
-    };
-  }
+  const startMatch = cleanSegment.match(rowStartRe);
 
-  // KEY FIX:
-  // Use BOTH raw body and normalized one-line body.
-  // Some PDFs fail on raw text because row columns are broken strangely.
-  const bodyRaw = startIdx !== -1 ? text.slice(startIdx) : text;
-  const bodyNormalized = normalizeOneLine(bodyRaw);
+  if (!startMatch) return null;
 
-  const headReRaw =
-    /(\d{1,6})\s*([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s*((?:[A-Z]{2,3}\d{6,20}|\d{8,20}))/gi;
+  const rowIndex = Number(startMatch[1]);
+  const speciesRaw = startMatch[2];
+  const tag = startMatch[3];
+  const rest = startMatch[4] || "";
 
-  const headReNormalized =
-    /(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+((?:[A-Z]{2,3}\d{6,20}|\d{8,20}))/gi;
+  if (!rowIndex || !isLikelyIndividualSpecies(speciesRaw)) return null;
 
-  function collectHeads(body, re) {
-    const heads = [];
-    let m;
-
-    re.lastIndex = 0;
-
-    while ((m = re.exec(body)) !== null) {
-      const idx = Number(m[1]);
-      const speciesRaw = m[2];
-      const tag = m[3];
-
-      if (!idx || !isLikelyIndividualSpecies(speciesRaw)) continue;
-
-      heads.push({
-        idx,
-        speciesRaw,
-        species: normalizeLithuanianSpecies(speciesRaw),
-        tag,
-        headStart: m.index,
-        dataStart: re.lastIndex,
-      });
-    }
-
-    return heads;
-  }
-
-  let bodyUsed = bodyRaw;
-  let heads = collectHeads(bodyRaw, headReRaw);
-  const rawHeadsFound = heads.length;
-
-  if (heads.length === 0) {
-    bodyUsed = bodyNormalized;
-    heads = collectHeads(bodyNormalized, headReNormalized);
-  }
-
-  const rawHeadsFoundNormalized = heads.length;
+  const species = normalizeLithuanianSpecies(speciesRaw);
 
   const DATE_RE =
     /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})/;
@@ -327,46 +264,60 @@ function parseIndividualAnimalsFromText(originalText) {
 
   const PASS_RE = /\b(?:[A-Z]{2}-\d+|\d{4,12})\b/;
 
-  const rows = [];
+  const sexMatch = findSexMatch(rest);
+  const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
 
-  for (let i = 0; i < heads.length; i++) {
-    const current = heads[i];
-    const next = heads[i + 1];
+  const beforeSex = sexMatch ? rest.slice(0, sexMatch.index).trim() : "";
+  const name = cleanName(beforeSex);
 
-    const sliceEnd = next ? next.headStart : bodyUsed.length;
+  const afterSexIdx = sexMatch ? sexMatch.index + sexMatch[0].length : 0;
+  const afterSex = rest.slice(afterSexIdx).trim();
 
-    const rawSliceBeforeTruncate = bodyUsed.slice(current.dataStart, sliceEnd);
-    const rawSlice = truncateRowSlice(rawSliceBeforeTruncate);
+  const dateMatch = afterSex.match(DATE_RE) || rest.match(DATE_RE);
+  const dateRaw = dateMatch ? dateMatch[0] : null;
+  const birthDate = toISO(dateRaw);
 
-    const slice = normalizeBreedSpacing(normalizeOneLine(rawSlice));
+  let ageMonths = null;
+  let breedRaw = null;
+  let passport = null;
 
-    const sexMatch = findSexMatch(slice);
-    const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
+  if (dateRaw) {
+    const datePosInAfterSex = afterSex.indexOf(dateRaw);
 
-    const beforeSex = sexMatch ? slice.slice(0, sexMatch.index).trim() : "";
-    const name = cleanName(beforeSex);
+    if (datePosInAfterSex !== -1) {
+      breedRaw = afterSex.slice(0, datePosInAfterSex).trim();
 
-    const afterSexIdx = sexMatch ? sexMatch.index + sexMatch[0].length : 0;
-    const afterSex = slice.slice(afterSexIdx).trim();
+      const afterDate = afterSex
+        .slice(datePosInAfterSex + dateRaw.length)
+        .trim();
 
-    const dateMatch = afterSex.match(DATE_RE) || slice.match(DATE_RE);
-    const dateRaw = dateMatch ? dateMatch[0] : null;
-    const birthDate = toISO(dateRaw);
+      const ageMatch = afterDate.match(AGE_RE);
 
-    let ageMonths = null;
-    let breedRaw = null;
-    let passport = null;
+      if (ageMatch) {
+        ageMonths = parseAge(ageMatch[1]);
 
-    if (dateMatch && dateRaw) {
-      const datePosInAfterSex = afterSex.indexOf(dateRaw);
-
-      if (datePosInAfterSex !== -1) {
-        breedRaw = afterSex.slice(0, datePosInAfterSex).trim();
-
-        const afterDate = afterSex
-          .slice(datePosInAfterSex + dateRaw.length)
+        const afterAge = afterDate
+          .slice(ageMatch[0].length)
           .trim();
 
+        const passMatch = afterAge.match(PASS_RE);
+        passport = passMatch ? passMatch[0] : null;
+      } else {
+        const passMatch = afterDate.match(PASS_RE);
+        passport = passMatch ? passMatch[0] : null;
+      }
+    } else {
+      const datePosInRest = rest.indexOf(dateRaw);
+
+      if (datePosInRest !== -1) {
+        if (sexMatch) {
+          const sexEnd = sexMatch.index + sexMatch[0].length;
+          breedRaw = rest.slice(sexEnd, datePosInRest).trim();
+        } else {
+          breedRaw = rest.slice(0, datePosInRest).trim();
+        }
+
+        const afterDate = rest.slice(datePosInRest + dateRaw.length).trim();
         const ageMatch = afterDate.match(AGE_RE);
 
         if (ageMatch) {
@@ -382,68 +333,106 @@ function parseIndividualAnimalsFromText(originalText) {
           const passMatch = afterDate.match(PASS_RE);
           passport = passMatch ? passMatch[0] : null;
         }
-      } else {
-        const datePosInSlice = slice.indexOf(dateRaw);
-
-        if (datePosInSlice !== -1) {
-          if (sexMatch) {
-            const sexEndInSlice = sexMatch.index + sexMatch[0].length;
-            breedRaw = slice.slice(sexEndInSlice, datePosInSlice).trim();
-          } else {
-            breedRaw = slice.slice(0, datePosInSlice).trim();
-          }
-
-          const afterDate = slice.slice(datePosInSlice + dateRaw.length).trim();
-          const ageMatch = afterDate.match(AGE_RE);
-
-          if (ageMatch) {
-            ageMonths = parseAge(ageMatch[1]);
-
-            const afterAge = afterDate
-              .slice(ageMatch[0].length)
-              .trim();
-
-            const passMatch = afterAge.match(PASS_RE);
-            passport = passMatch ? passMatch[0] : null;
-          } else {
-            const passMatch = afterDate.match(PASS_RE);
-            passport = passMatch ? passMatch[0] : null;
-          }
-        }
       }
-    }
-
-    let row = {
-      row_index: current.idx,
-      species: current.species,
-      species_label: current.speciesRaw,
-      tag_no: current.tag,
-      name,
-      sex,
-      breed: cleanBreed(normalizeBreedSpacing(breedRaw)),
-      birth_date: birthDate,
-      age_months: ageMonths,
-      passport,
-      row_type: "individual",
-      source: "vic_pdf",
-    };
-
-    row = splitSexFromBreedIfNeeded(row);
-
-    if (
-      row.row_index &&
-      row.species &&
-      row.tag_no &&
-      /^(?:[A-Z]{2,3}\d+|\d+)$/i.test(row.tag_no) &&
-      row.birth_date
-    ) {
-      rows.push(row);
     }
   }
 
+  let row = {
+    row_index: rowIndex,
+    species,
+    species_label: speciesRaw,
+    tag_no: tag,
+    name,
+    sex,
+    breed: cleanBreed(normalizeBreedSpacing(breedRaw)),
+    birth_date: birthDate,
+    age_months: ageMonths,
+    passport,
+    row_type: "individual",
+    source: "vic_pdf",
+  };
+
+  row = splitSexFromBreedIfNeeded(row);
+
+  if (
+    row.row_index &&
+    row.species &&
+    row.tag_no &&
+    /^(?:[A-Z]{2,3}\d+|\d+)$/i.test(row.tag_no) &&
+    row.birth_date
+  ) {
+    return row;
+  }
+
+  return null;
+}
+
+// ---------- individual parser ----------
+function parseIndividualAnimalsFromText(originalText) {
+  const text = normalizeText(originalText || "");
+
+  const { allLines, headerIdx, startIdx, foundHeader } = getHeaderDebug(text);
+
+  if (!foundHeader) {
+    return {
+      rows: [],
+      debug: {
+        headerIdx,
+        totalLines: allLines.length,
+        startIdx,
+        foundHeader: false,
+        rawHeadsFound: 0,
+        rawHeadsFoundNormalized: 0,
+        lineSegmentsFound: 0,
+      },
+    };
+  }
+
+  // This is now the main parser: line segments.
+  // It catches PDFs where body regex fails.
+  const rowStartLineRe =
+    /^(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+((?:[A-Z]{2,3}\d+|\d{8,20}))(?:\s+.*)?$/u;
+
+  const segments = [];
+  let current = null;
+
+  for (const rawLine of allLines) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+
+    const startMatch = line.match(rowStartLineRe);
+
+    if (startMatch && isLikelyIndividualSpecies(startMatch[2])) {
+      if (current) segments.push(current);
+      current = line;
+      continue;
+    }
+
+    if (current) {
+      if (shouldStopLine(line)) {
+        segments.push(current);
+        current = null;
+        continue;
+      }
+
+      // Continuation line, for wrapped names/breeds.
+      current += " " + line;
+    }
+  }
+
+  if (current) segments.push(current);
+
+  const lineRows = [];
+
+  for (const segment of segments) {
+    const row = parseIndividualRowSegment(segment);
+    if (row) lineRows.push(row);
+  }
+
+  // Dedup by species + tag
   const seen = new Set();
 
-  const unique = rows.filter((r) => {
+  const unique = lineRows.filter((r) => {
     const key = `${r.species}:${r.tag_no}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -458,9 +447,10 @@ function parseIndividualAnimalsFromText(originalText) {
       startIdx,
       foundHeader: true,
       matched: unique.length,
-      rawHeadsFound,
-      rawHeadsFoundNormalized,
-      parser_mode: rawHeadsFound > 0 ? "raw_body" : "normalized_body",
+      rawHeadsFound: 0,
+      rawHeadsFoundNormalized: 0,
+      lineSegmentsFound: segments.length,
+      parser_mode: "line_segments",
     },
   };
 }
@@ -471,59 +461,55 @@ function parseGroupedAnimalsFromText(originalText) {
 
   const groups = [];
 
-  const groupHeaderRe =
-    /Eil\.\s*Nr\.\s*Rūšis\s*Grupė\s*Gyvūnų\s*skaičius\s*Matavimo\s*vienetai/gi;
+  const lines = text
+    .split(/\n/)
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 
-  let headerMatch;
+  let insideGroupedTable = false;
 
-  while ((headerMatch = groupHeaderRe.exec(text)) !== null) {
-    const blockStart = groupHeaderRe.lastIndex;
-    const rest = text.slice(blockStart);
-
-    const nextSectionMatch = rest.search(/\n\s*\d+\.\s+Laikytojas/i);
-    const declaredMatch = rest.search(/Deklaruota\s+gyvūnų/i);
-    const footerMatch = rest.search(/www\.zudc\.lt/i);
-
-    let blockEnd = rest.length;
-
-    for (const idx of [nextSectionMatch, declaredMatch, footerMatch]) {
-      if (idx !== -1 && idx < blockEnd) blockEnd = idx;
+  for (const line of lines) {
+    if (
+      /Eil\.\s*Nr\.\s*Rūšis\s*Grupė\s*Gyvūnų\s*skaičius\s*Matavimo\s*vienetai/i.test(
+        line
+      )
+    ) {
+      insideGroupedTable = true;
+      continue;
     }
 
-    const block = rest.slice(0, blockEnd);
-
-    const lines = block
-      .split(/\n/)
-      .map((s) => s.replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-
-    for (const line of lines) {
-      const rowRe =
-        /^(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+(.+?)\s+(\d+(?:[,.]\d+)?)\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)$/u;
-
-      const m = line.match(rowRe);
-
-      if (!m) continue;
-
-      const rowIndex = Number(m[1]);
-      const speciesRaw = m[2];
-      const groupName = m[3].trim();
-      const count = parseCount(m[4]);
-      const unit = m[5].trim();
-
-      if (!rowIndex || !speciesRaw || count === null) continue;
-
-      groups.push({
-        row_index: rowIndex,
-        species: normalizeLithuanianSpecies(speciesRaw),
-        species_label: speciesRaw,
-        group: groupName,
-        animal_count: count,
-        unit,
-        row_type: "group",
-        source: "vic_pdf",
-      });
+    if (insideGroupedTable && shouldStopLine(line)) {
+      insideGroupedTable = false;
+      continue;
     }
+
+    if (!insideGroupedTable) continue;
+
+    const rowRe =
+      /^(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+(.+?)\s+(\d+(?:[,.]\d+)?)\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)$/u;
+
+    const m = line.match(rowRe);
+
+    if (!m) continue;
+
+    const rowIndex = Number(m[1]);
+    const speciesRaw = m[2];
+    const groupName = m[3].trim();
+    const count = parseCount(m[4]);
+    const unit = m[5].trim();
+
+    if (!rowIndex || !speciesRaw || count === null) continue;
+
+    groups.push({
+      row_index: rowIndex,
+      species: normalizeLithuanianSpecies(speciesRaw),
+      species_label: speciesRaw,
+      group: groupName,
+      animal_count: count,
+      unit,
+      row_type: "group",
+      source: "vic_pdf",
+    });
   }
 
   const seen = new Set();
