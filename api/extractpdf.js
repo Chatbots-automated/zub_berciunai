@@ -4,135 +4,212 @@ const pdfParse = require("pdf-parse");
 // ---------- helpers ----------
 function toISO(d) {
   if (!d) return null;
+
   // YYYY[-./]MM[-./]DD
   let m = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+
   // DD[-./]MM[-./]YYYY
   m = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+
   return null;
 }
 
 function normalizeSex(s) {
   if (!s) return null;
-  const x = s.toLowerCase();
-  if (x.startsWith("buliu")) return "Bulius";     // Bulius, Buliukas → Bulius (tweak if you want to keep Buliukas)
-  if (x.startsWith("karv"))  return "Karvė";      // Karvė/Karve → Karvė
-  if (x.startsWith("tely"))  return "Telyčaitė";  // Telytė/Telyte/Telyčia/Telycia → Telyčaitė
+
+  const x = String(s).trim().toLowerCase();
+
+  if (x.startsWith("buliuk")) return "Buliukas";
+  if (x.startsWith("buliu")) return "Bulius";
+  if (x.startsWith("karv")) return "Karvė";
+  if (x.startsWith("tely")) return "Telyčaitė";
+
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+function parseAge(raw) {
+  if (!raw) return null;
+
+  const n = Number(String(raw).replace(",", "."));
+
+  if (!Number.isFinite(n)) return null;
+
+  // Protect against garbage from summary blocks like "758"
+  if (n < 0 || n > 300) return null;
+
+  return n;
+}
+
+function cleanBreed(s) {
+  if (!s) return null;
+
+  const cleaned = String(s)
+    .replace(/\s+/g, " ")
+    .replace(/\bwww\.zudc\.lt\b/gi, "")
+    .replace(/\bGyvų gyvūnų sąrašas\b/gi, "")
+    .replace(/\bSugrupuota statistika\b/gi, "")
+    .replace(/\bIš viso ataskaitoje\b/gi, "")
+    .replace(/\bIš viso registruota grupėmis\b/gi, "")
+    .trim();
+
+  return cleaned || null;
 }
 
 // ---------- core parser ----------
 function parseAnimalsFromText(text) {
-  // Find header region
-  const headerPattern = /Eil\.\s*Nr\.[\s\S]*?Gimimo\s*data/i;
-  const headerMatch = text.match(headerPattern);
-  const startIdx = headerMatch ? text.indexOf(headerMatch[0]) : -1;
+  const originalText = text || "";
 
-  const allLines = text
+  const allLines = originalText
     .split(/\r?\n/)
     .map((s) => s.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
+  const headerPattern = /Eil\.\s*Nr\.[\s\S]*?Gimimo\s*data/i;
+  const headerMatch = originalText.match(headerPattern);
+  const startIdx = headerMatch ? originalText.indexOf(headerMatch[0]) : -1;
+
   const headerIdx = allLines.findIndex(
-    (l) => /Eil\.\s*Nr\./i.test(l) && /(Rūšis|Rusis)/i.test(l) && /Gimimo\s*data/i.test(l)
+    (l) =>
+      /Eil\.\s*Nr\./i.test(l) &&
+      /(Rūšis|Rusis)/i.test(l) &&
+      /Gimimo\s*data/i.test(l)
   );
 
   if (startIdx === -1 || headerIdx === -1) {
     return {
       rows: [],
-      debug: { headerIdx, totalLines: allLines.length, startIdx, foundHeader: false },
+      debug: {
+        headerIdx,
+        totalLines: allLines.length,
+        startIdx,
+        foundHeader: false,
+      },
     };
   }
 
-  const body = text.slice(startIdx);
+  let body = originalText.slice(startIdx);
 
-  // Row head: index + 'Galvijai' + tag
-  const headRe = /(\d+)\s*Galvijai\s*(DE\d+|LT\d+)/gi;
+  // CRITICAL FIX:
+  // Cut off summary/footer blocks after the real animal table.
+  // Without this, the final animal eats "Sugrupuota statistika", "Karvė Iš viso: 758", etc.
+  const stopMatch = body.search(
+    /(?:Sugrupuota\s+statistika|Iš\s+viso\s+ataskaitoje|Iš\s+viso\s+registruota\s+grupėmis)/i
+  );
 
-  // Tokens/patterns inside a row slice
-  const SEX_RE = /\b(Karvė|Karve|Telyčaitė|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)\b/i;
-  const DATE_RE = /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})/; // first match after sex
-  const AGE_RE  = /^\s*(\d+)(?:\s*(?:mėn|men)\.?)?/i;
+  if (stopMatch !== -1) {
+    body = body.slice(0, stopMatch);
+  }
+
+  // Row head: index + Galvijai + tag
+  // Works both when pdf-parse puts fields in one line and when it puts each cell on separate lines.
+  const headRe = /(\d{1,6})\s+Galvijai\s+((?:DE|LT)\d{9,15})/gi;
+
+  const SEX_RE =
+    /\b(Karvė|Karve|Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)\b/i;
+
+  const DATE_RE =
+    /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})/;
+
+  const AGE_RE = /^\s*(\d+(?:[,.]\d+)?)(?:\s*(?:mėn|men)\.?)?/i;
+
   const PASS_RE = /[A-Z]{2}-\d+/;
 
-  // Build segments between row heads
-  const segments = [];
+  const heads = [];
   let m;
+
   while ((m = headRe.exec(body)) !== null) {
-    const idx = Number(m[1]);
-    const tag = m[2];
-    const start = m.index + m[0].length;
-    segments.push({ idx, tag, start });
-  }
-  // Add end boundaries
-  for (let i = 0; i < segments.length; i++) {
-    segments[i].end = (i + 1 < segments.length) ? segments[i + 1].start - (segments[i + 1].tag.length + 0) : body.length;
-  }
-
-  const rows = [];
-  for (let i = 0; i < segments.length; i++) {
-    const { idx, tag, start, end } = segments[i];
-    // Safer end: up to next head match index
-    const nextHead = (function () {
-      const m2 = headRe.exec(body); // headRe lastIndex is at end; reset and find next from this segment's start
-      return null;
-    })();
-    const segEnd = (i + 1 < segments.length) ? segments[i + 1].start - (0) : end; // keep earlier computed end
-    const slice = body.slice(start, segEnd);
-
-    // 1) Sex (anchor)
-    const sexMatch = slice.match(SEX_RE);
-    if (!sexMatch) {
-      // If sex missing, we still try to find date/age and leave sex null
-    }
-    const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
-    const afterSexIdx = sexMatch ? (sexMatch.index + sexMatch[0].length) : 0;
-    const afterSex = slice.slice(afterSexIdx);
-
-    // 2) Date (first date after sex)
-    const dateMatch = afterSex.match(DATE_RE) || slice.match(DATE_RE);
-    const dateStrRaw = dateMatch ? dateMatch[0] : null;
-    const dateISO = toISO(dateStrRaw);
-
-    // 3) Age (digits right after found date)
-    let ageMonths = null;
-    if (dateMatch) {
-      const afterDate = afterSex.slice(afterSex.indexOf(dateMatch[0]) + dateMatch[0].length);
-      const ageMatch = afterDate.match(AGE_RE);
-      if (ageMatch) ageMonths = Number(ageMatch[1]);
-    }
-
-    // 4) Breed (between sex and date)
-    let breedRaw = null;
-    if (sexMatch && dateMatch) {
-      const breedRegion = afterSex.slice(0, afterSex.indexOf(dateMatch[0]));
-      breedRaw = breedRegion.replace(/\s+/g, " ").trim();
-    } else if (sexMatch) {
-      // If date not found, take some reasonable chunk after sex as breed
-      breedRaw = afterSex.replace(/\s+/g, " ").trim();
-    }
-
-    // 5) Passport (anywhere in slice)
-    const passMatch = slice.match(PASS_RE);
-    const passport = passMatch ? passMatch[0] : null;
-
-    rows.push({
-      row_index: idx,
-      species: "galvijai",
-      tag_no: tag,
-      name: null,
-      sex: sex,
-      breed: breedRaw || null,
-      birth_date: dateISO,
-      age_months: Number.isFinite(ageMonths) ? ageMonths : null,
-      passport: passport,
+    heads.push({
+      idx: Number(m[1]),
+      tag: m[2],
+      headStart: m.index,
+      dataStart: headRe.lastIndex,
     });
   }
 
-  // Dedup by tag (keep first)
+  const rows = [];
+
+  for (let i = 0; i < heads.length; i++) {
+    const current = heads[i];
+    const next = heads[i + 1];
+
+    // CRITICAL FIX:
+    // End the row BEFORE the next row head starts.
+    // Your old code ended around next.dataStart, which let the next row leak into the previous slice.
+    const sliceEnd = next ? next.headStart : body.length;
+    const rawSlice = body.slice(current.dataStart, sliceEnd);
+
+    const slice = rawSlice.replace(/\s+/g, " ").trim();
+
+    const sexMatch = slice.match(SEX_RE);
+    const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
+
+    const afterSexIdx = sexMatch
+      ? sexMatch.index + sexMatch[0].length
+      : 0;
+
+    const afterSex = slice.slice(afterSexIdx).trim();
+
+    const dateMatch = afterSex.match(DATE_RE) || slice.match(DATE_RE);
+    const dateRaw = dateMatch ? dateMatch[0] : null;
+    const birthDate = toISO(dateRaw);
+
+    let ageMonths = null;
+    let breedRaw = null;
+
+    if (dateMatch) {
+      const datePosInAfterSex = afterSex.indexOf(dateRaw);
+
+      if (datePosInAfterSex !== -1) {
+        breedRaw = afterSex.slice(0, datePosInAfterSex).trim();
+
+        const afterDate = afterSex
+          .slice(datePosInAfterSex + dateRaw.length)
+          .trim();
+
+        const ageMatch = afterDate.match(AGE_RE);
+        if (ageMatch) {
+          ageMonths = parseAge(ageMatch[1]);
+        }
+      }
+    }
+
+    const passMatch = slice.match(PASS_RE);
+    const passport = passMatch ? passMatch[0] : null;
+
+    const row = {
+      row_index: current.idx,
+      species: "galvijai",
+      tag_no: current.tag,
+      name: null,
+      sex,
+      breed: cleanBreed(breedRaw),
+      birth_date: birthDate,
+      age_months: ageMonths,
+      passport,
+    };
+
+    // Safety filter:
+    // Only keep rows that actually look like animal rows.
+    // This prevents footer/statistic garbage from entering the result.
+    if (
+      row.row_index &&
+      row.tag_no &&
+      /^(DE|LT)\d{9,15}$/i.test(row.tag_no) &&
+      row.birth_date
+    ) {
+      rows.push(row);
+    }
+  }
+
+  // Dedup by tag, keep first
   const seen = new Set();
-  const unique = rows.filter((r) => !seen.has(r.tag_no) && seen.add(r.tag_no));
+  const unique = rows.filter((r) => {
+    if (seen.has(r.tag_no)) return false;
+    seen.add(r.tag_no);
+    return true;
+  });
 
   return {
     rows: unique,
@@ -142,6 +219,8 @@ function parseAnimalsFromText(text) {
       startIdx,
       foundHeader: true,
       matched: unique.length,
+      rawHeadsFound: heads.length,
+      stoppedBeforeSummary: stopMatch !== -1,
     },
   };
 }
@@ -157,34 +236,63 @@ module.exports = async function handler(req, res) {
     const ct = (req.headers["content-type"] || "").toLowerCase();
     let pdfBuffer = null;
 
-    if (ct.includes("application/pdf") || ct.includes("application/octet-stream")) {
+    if (
+      ct.includes("application/pdf") ||
+      ct.includes("application/octet-stream")
+    ) {
       const chunks = [];
+
       await new Promise((resolve, reject) => {
         req.on("data", (c) => chunks.push(c));
         req.on("end", resolve);
         req.on("error", reject);
       });
+
       pdfBuffer = Buffer.concat(chunks);
     } else if (ct.includes("application/json")) {
       const body = await new Promise((resolve, reject) => {
         let data = "";
+
         req.setEncoding("utf8");
-        req.on("data", (ch) => (data += ch));
-        req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
+
+        req.on("data", (ch) => {
+          data += ch;
+        });
+
+        req.on("end", () => {
+          try {
+            resolve(data ? JSON.parse(data) : {});
+          } catch (e) {
+            reject(e);
+          }
+        });
+
         req.on("error", reject);
       });
+
       if (!body || !body.url) {
-        res.status(400).json({ error: "Provide raw PDF body or JSON { url }" });
+        res.status(400).json({
+          error: "Provide raw PDF body or JSON { url }",
+        });
         return;
       }
+
       const r = await fetch(body.url);
+
       if (!r.ok) {
-        res.status(400).json({ error: "Cannot fetch URL" });
+        res.status(400).json({
+          error: "Cannot fetch URL",
+          status: r.status,
+        });
         return;
       }
+
       pdfBuffer = Buffer.from(await r.arrayBuffer());
     } else {
-      res.status(400).json({ error: "Unsupported content-type", contentType: ct });
+      res.status(400).json({
+        error: "Unsupported content-type",
+        contentType: ct,
+      });
       return;
     }
 
@@ -192,12 +300,24 @@ module.exports = async function handler(req, res) {
     const { rows, debug } = parseAnimalsFromText(parsed.text || "");
 
     res.setHeader("Cache-Control", "no-store");
-    res.status(200).json({ count: rows.length, animals: rows, debug });
+
+    res.status(200).json({
+      count: rows.length,
+      animals: rows,
+      debug,
+    });
   } catch (e) {
     console.error("[extractpdf] ERROR:", e);
-    res.status(500).json({ error: e?.message || "parse_error" });
+
+    res.status(500).json({
+      error: e?.message || "parse_error",
+    });
   }
 };
 
 // Next.js Pages API: disable body parser
-module.exports.config = { api: { bodyParser: false } };
+module.exports.config = {
+  api: {
+    bodyParser: false,
+  },
+};
