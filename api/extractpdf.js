@@ -5,15 +5,27 @@ const pdfParse = require("pdf-parse");
 function toISO(d) {
   if (!d) return null;
 
-  // YYYY[-./]MM[-./]DD
   let m = String(d).match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
 
-  // DD[-./]MM[-./]YYYY
   m = String(d).match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
 
   return null;
+}
+
+function normalizeText(s) {
+  return String(s || "")
+    .replace(/\u00A0/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\r/g, "\n");
+}
+
+function normalizeOneLine(s) {
+  return normalizeText(s)
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizeLithuanianSpecies(s) {
@@ -25,6 +37,7 @@ function normalizeLithuanianSpecies(s) {
     galvijai: "galvijai",
     arkliai: "arkliai",
     avys: "avys",
+    avis: "avys",
     ožkos: "ozkos",
     ozkos: "ozkos",
     kiaulės: "kiaules",
@@ -56,7 +69,7 @@ function normalizeSex(s) {
   if (x.startsWith("kumel")) return "Kumelė";
   if (x.startsWith("kastr")) return "Kastratas";
 
-  // Avys / ožkos / kiaulės, if needed later
+  // Other animals, future support
   if (x.startsWith("avinas")) return "Avinas";
   if (x.startsWith("avis")) return "Avis";
   if (x.startsWith("ėriuk") || x.startsWith("eriuk")) return "Ėriukas";
@@ -65,7 +78,7 @@ function normalizeSex(s) {
   if (x.startsWith("paršav") || x.startsWith("parsav")) return "Paršavedė";
   if (x.startsWith("kuil")) return "Kuilys";
 
-  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  return String(s).charAt(0).toUpperCase() + String(s).slice(1).toLowerCase();
 }
 
 function parseAge(raw) {
@@ -74,8 +87,6 @@ function parseAge(raw) {
   const n = Number(String(raw).replace(",", "."));
 
   if (!Number.isFinite(n)) return null;
-
-  // Prevent summary garbage like 758 from becoming animal age
   if (n < 0 || n > 400) return null;
 
   return n;
@@ -98,9 +109,6 @@ function normalizeBreedSpacing(s) {
   if (!s) return null;
 
   return String(s)
-    // Insert missing space when pdf-parse glues sex + breed:
-    // BuliukasHolšteinai -> Buliukas Holšteinai
-    // KumelėLietuvos sunkieji -> Kumelė Lietuvos sunkieji
     .replace(
       new RegExp(`(${SEX_WORDS})(?=[A-ZĄČĘĖĮŠŲŪŽ])`, "g"),
       "$1 "
@@ -120,10 +128,7 @@ function cleanBreed(s) {
     .replace(/\bIš viso ataskaitoje\b/gi, "")
     .replace(/\bIš viso registruota grupėmis\b/gi, "")
     .replace(/\bDeklaruota gyvūnų\b/gi, "")
-
-    // Remove sex if it somehow still leaked into breed
     .replace(new RegExp(`^(${SEX_WORDS})\\s*`, "i"), "")
-
     .trim();
 
   return cleaned || null;
@@ -138,13 +143,8 @@ function cleanName(s) {
 
   if (!name) return null;
 
-  // Horse names sometimes split like:
-  // GARBAN A -> GARBANA
-  // BLAKSTIE NA -> BLAKSTIENA
-  // PANORA MA -> PANORAMA
-  //
-  // If it is all uppercase letters/spaces, join the chunks.
   const onlyUpperNameChars = /^[A-ZĄČĘĖĮŠŲŪŽ\s.'-]+$/u.test(name);
+
   if (onlyUpperNameChars) {
     name = name.replace(/\s+/g, "");
   }
@@ -156,11 +156,6 @@ function findSexMatch(slice) {
   if (!slice) return null;
 
   const normalized = normalizeBreedSpacing(slice);
-
-  // No strict word boundary, because pdf-parse can glue:
-  // BuliukasHolšteinai
-  // KumelėLietuvos sunkieji
-  // EržilasStambieji žemaitukai
   const SEX_RE = new RegExp(`(${SEX_WORDS})`, "i");
 
   return normalized.match(SEX_RE);
@@ -228,12 +223,12 @@ function isLikelyIndividualSpecies(speciesRaw) {
   ].includes(s);
 }
 
-// ---------- individual animal parser ----------
-function parseIndividualAnimalsFromText(originalText) {
-  const text = originalText || "";
+// ---------- header / section helpers ----------
+function getHeaderDebug(originalText) {
+  const text = normalizeText(originalText);
 
   const allLines = text
-    .split(/\r?\n/)
+    .split(/\n/)
     .map((s) => s.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
@@ -248,7 +243,21 @@ function parseIndividualAnimalsFromText(originalText) {
       /Gimimo\s*data/i.test(l)
   );
 
-  if (startIdx === -1 || headerIdx === -1) {
+  return {
+    allLines,
+    headerIdx,
+    startIdx,
+    foundHeader: startIdx !== -1 || headerIdx !== -1,
+  };
+}
+
+// ---------- individual animal parser ----------
+function parseIndividualAnimalsFromText(originalText) {
+  const text = normalizeText(originalText || "");
+
+  const { allLines, headerIdx, startIdx, foundHeader } = getHeaderDebug(text);
+
+  if (!foundHeader) {
     return {
       rows: [],
       debug: {
@@ -257,50 +266,66 @@ function parseIndividualAnimalsFromText(originalText) {
         startIdx,
         foundHeader: false,
         rawHeadsFound: 0,
+        rawHeadsFoundNormalized: 0,
       },
     };
   }
 
-  const body = text.slice(startIdx);
+  // KEY FIX:
+  // Use BOTH raw body and normalized one-line body.
+  // Some PDFs fail on raw text because row columns are broken strangely.
+  const bodyRaw = startIdx !== -1 ? text.slice(startIdx) : text;
+  const bodyNormalized = normalizeOneLine(bodyRaw);
 
-  // Generic individual animal row head:
-  // 1 Galvijai LT000009291279
-  // 1 Arkliai 428001900005461
-  // 88 Arkliai LTU004110360913
-  //
-  // Does NOT catch grouped rows like:
-  // 1 Vištos Iš viso 9 vnt.
-  const headRe =
-    /(\d{1,6})\s*([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s*((?:[A-Z]{2,3}\d{6,20}|\d{8,20}))/gu;
+  const headReRaw =
+    /(\d{1,6})\s*([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s*((?:[A-Z]{2,3}\d{6,20}|\d{8,20}))/gi;
+
+  const headReNormalized =
+    /(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+((?:[A-Z]{2,3}\d{6,20}|\d{8,20}))/gi;
+
+  function collectHeads(body, re) {
+    const heads = [];
+    let m;
+
+    re.lastIndex = 0;
+
+    while ((m = re.exec(body)) !== null) {
+      const idx = Number(m[1]);
+      const speciesRaw = m[2];
+      const tag = m[3];
+
+      if (!idx || !isLikelyIndividualSpecies(speciesRaw)) continue;
+
+      heads.push({
+        idx,
+        speciesRaw,
+        species: normalizeLithuanianSpecies(speciesRaw),
+        tag,
+        headStart: m.index,
+        dataStart: re.lastIndex,
+      });
+    }
+
+    return heads;
+  }
+
+  let bodyUsed = bodyRaw;
+  let heads = collectHeads(bodyRaw, headReRaw);
+  const rawHeadsFound = heads.length;
+
+  if (heads.length === 0) {
+    bodyUsed = bodyNormalized;
+    heads = collectHeads(bodyNormalized, headReNormalized);
+  }
+
+  const rawHeadsFoundNormalized = heads.length;
 
   const DATE_RE =
     /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})/;
 
   const AGE_RE = /^\s*(\d+(?:[,.]\d+)?)(?:\s*(?:mėn|men)\.?)?/i;
 
-  // Horses often have numeric passports like 043171.
-  // Cattle often have AF-096882.
   const PASS_RE = /\b(?:[A-Z]{2}-\d+|\d{4,12})\b/;
-
-  const heads = [];
-  let m;
-
-  while ((m = headRe.exec(body)) !== null) {
-    const idx = Number(m[1]);
-    const speciesRaw = m[2];
-    const tag = m[3];
-
-    if (!isLikelyIndividualSpecies(speciesRaw)) continue;
-
-    heads.push({
-      idx,
-      speciesRaw,
-      species: normalizeLithuanianSpecies(speciesRaw),
-      tag,
-      headStart: m.index,
-      dataStart: headRe.lastIndex,
-    });
-  }
 
   const rows = [];
 
@@ -308,12 +333,12 @@ function parseIndividualAnimalsFromText(originalText) {
     const current = heads[i];
     const next = heads[i + 1];
 
-    const sliceEnd = next ? next.headStart : body.length;
+    const sliceEnd = next ? next.headStart : bodyUsed.length;
 
-    const rawSliceBeforeTruncate = body.slice(current.dataStart, sliceEnd);
+    const rawSliceBeforeTruncate = bodyUsed.slice(current.dataStart, sliceEnd);
     const rawSlice = truncateRowSlice(rawSliceBeforeTruncate);
 
-    const slice = normalizeBreedSpacing(rawSlice.replace(/\s+/g, " ").trim());
+    const slice = normalizeBreedSpacing(normalizeOneLine(rawSlice));
 
     const sexMatch = findSexMatch(slice);
     const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
@@ -358,7 +383,6 @@ function parseIndividualAnimalsFromText(originalText) {
           passport = passMatch ? passMatch[0] : null;
         }
       } else {
-        // fallback if date was found in full slice but not after sex
         const datePosInSlice = slice.indexOf(dateRaw);
 
         if (datePosInSlice !== -1) {
@@ -406,7 +430,6 @@ function parseIndividualAnimalsFromText(originalText) {
 
     row = splitSexFromBreedIfNeeded(row);
 
-    // Keep only real individual animal rows
     if (
       row.row_index &&
       row.species &&
@@ -418,7 +441,6 @@ function parseIndividualAnimalsFromText(originalText) {
     }
   }
 
-  // Dedup by species + tag
   const seen = new Set();
 
   const unique = rows.filter((r) => {
@@ -436,14 +458,16 @@ function parseIndividualAnimalsFromText(originalText) {
       startIdx,
       foundHeader: true,
       matched: unique.length,
-      rawHeadsFound: heads.length,
+      rawHeadsFound,
+      rawHeadsFoundNormalized,
+      parser_mode: rawHeadsFound > 0 ? "raw_body" : "normalized_body",
     },
   };
 }
 
 // ---------- grouped animal parser ----------
 function parseGroupedAnimalsFromText(originalText) {
-  const text = originalText || "";
+  const text = normalizeText(originalText || "");
 
   const groups = [];
 
@@ -454,7 +478,6 @@ function parseGroupedAnimalsFromText(originalText) {
 
   while ((headerMatch = groupHeaderRe.exec(text)) !== null) {
     const blockStart = groupHeaderRe.lastIndex;
-
     const rest = text.slice(blockStart);
 
     const nextSectionMatch = rest.search(/\n\s*\d+\.\s+Laikytojas/i);
@@ -470,14 +493,11 @@ function parseGroupedAnimalsFromText(originalText) {
     const block = rest.slice(0, blockEnd);
 
     const lines = block
-      .split(/\r?\n/)
+      .split(/\n/)
       .map((s) => s.replace(/\s+/g, " ").trim())
       .filter(Boolean);
 
     for (const line of lines) {
-      // Example:
-      // 1 Vištos Iš viso 9 vnt.
-      // 2 Vištos Kitos vištos (iš viso) 8 vnt.
       const rowRe =
         /^(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+(.+?)\s+(\d+(?:[,.]\d+)?)\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)$/u;
 
@@ -506,7 +526,6 @@ function parseGroupedAnimalsFromText(originalText) {
     }
   }
 
-  // Dedup grouped rows
   const seen = new Set();
 
   return groups.filter((r) => {
@@ -626,11 +645,8 @@ module.exports = async function handler(req, res) {
     res.status(200).json({
       count: rows.length,
       animals: rows,
-
-      // For grouped animals like Vištos, where there is no tag number.
       grouped_count: groupedRows.length,
       grouped_animals: groupedRows,
-
       debug,
     });
   } catch (e) {
@@ -642,7 +658,6 @@ module.exports = async function handler(req, res) {
   }
 };
 
-// Next.js Pages API: disable body parser
 module.exports.config = {
   api: {
     bodyParser: false,
