@@ -69,7 +69,7 @@ function normalizeSex(s) {
   if (x.startsWith("kumel")) return "Kumelė";
   if (x.startsWith("kastr")) return "Kastratas";
 
-  // Other animals
+  // Other animals / future
   if (x.startsWith("avinas")) return "Avinas";
   if (x.startsWith("avis")) return "Avis";
   if (x.startsWith("ėriuk") || x.startsWith("eriuk")) return "Ėriukas";
@@ -101,6 +101,12 @@ function parseCount(raw) {
 
   return n;
 }
+
+const SPECIES_WORDS =
+  "Galvijai|Arkliai|Avys|Avis|Ožkos|Ozkos|Kiaulės|Kiaules|Triušiai|Triusiai";
+
+const GROUPED_SPECIES_WORDS =
+  "Vištos|Vistos|Paukščiai|Pauksciai|Galvijai|Arkliai|Avys|Avis|Ožkos|Ozkos|Kiaulės|Kiaules|Triušiai|Triusiai";
 
 const SEX_WORDS =
   "Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia|Buliukas|Bulius|Karvė|Karve|Eržilas|Erzilas|Kumelė|Kumele|Kastratas|Avis|Avinas|Ėriukas|Eriukas|Ožka|Ozka|Ožys|Ozys|Paršavedė|Parsavede|Kuilys";
@@ -152,16 +158,42 @@ function cleanName(s) {
   return name || null;
 }
 
-function findSexMatch(slice) {
-  if (!slice) return null;
+function findSexMatch(s) {
+  if (!s) return null;
 
-  const normalized = normalizeBreedSpacing(slice);
-  const SEX_RE = new RegExp(`(${SEX_WORDS})`, "i");
+  const normalized = normalizeBreedSpacing(s);
+  const re = new RegExp(`(${SEX_WORDS})`, "i");
 
-  return normalized.match(SEX_RE);
+  return normalized.match(re);
 }
 
-function splitSexFromBreedIfNeeded(row) {
+function splitMiddleIntoNameSexBreed(middle) {
+  const cleanMiddle = normalizeBreedSpacing(normalizeOneLine(middle));
+
+  const sexMatch = findSexMatch(cleanMiddle);
+
+  if (!sexMatch) {
+    return {
+      name: cleanName(cleanMiddle),
+      sex: null,
+      breed: null,
+    };
+  }
+
+  const nameRaw = cleanMiddle.slice(0, sexMatch.index).trim();
+  const sexRaw = sexMatch[0];
+  const breedRaw = cleanMiddle
+    .slice(sexMatch.index + sexRaw.length)
+    .trim();
+
+  return {
+    name: cleanName(nameRaw),
+    sex: normalizeSex(sexRaw),
+    breed: cleanBreed(breedRaw),
+  };
+}
+
+function fixSexBreed(row) {
   if (!row) return row;
 
   if (row.sex) {
@@ -182,32 +214,6 @@ function splitSexFromBreedIfNeeded(row) {
   row.breed = cleanBreed(m[2]);
 
   return row;
-}
-
-function isLikelyIndividualSpecies(speciesRaw) {
-  const s = normalizeLithuanianSpecies(speciesRaw);
-
-  return [
-    "galvijai",
-    "arkliai",
-    "avys",
-    "ozkos",
-    "kiaules",
-    "triusiai",
-  ].includes(s);
-}
-
-function shouldStopLine(line) {
-  return (
-    /www\.zudc\.lt/i.test(line) ||
-    /Gyvų gyvūnų sąrašas/i.test(line) ||
-    /Sugrupuota\s+statistika/i.test(line) ||
-    /Iš\s+viso\s+ataskaitoje/i.test(line) ||
-    /Iš\s+viso\s+registruota\s+grupėmis/i.test(line) ||
-    /Deklaruota\s+gyvūnų/i.test(line) ||
-    /^\d+\.\s+Laikytojas/i.test(line) ||
-    /Eil\.\s*Nr\./i.test(line)
-  );
 }
 
 function getHeaderDebug(originalText) {
@@ -237,202 +243,81 @@ function getHeaderDebug(originalText) {
   };
 }
 
-// ---------- row parsing ----------
-function parseIndividualRowSegment(segment) {
-  const cleanSegment = normalizeBreedSpacing(normalizeOneLine(segment));
+function isValidTag(tag) {
+  if (!tag) return false;
 
-  const rowStartRe =
-    /^(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+((?:[A-Z]{2,3}\d+|\d{8,20}))\s*(.*)$/u;
-
-  const startMatch = cleanSegment.match(rowStartRe);
-
-  if (!startMatch) return null;
-
-  const rowIndex = Number(startMatch[1]);
-  const speciesRaw = startMatch[2];
-  const tag = startMatch[3];
-  const rest = startMatch[4] || "";
-
-  if (!rowIndex || !isLikelyIndividualSpecies(speciesRaw)) return null;
-
-  const species = normalizeLithuanianSpecies(speciesRaw);
-
-  const DATE_RE =
-    /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})/;
-
-  const AGE_RE = /^\s*(\d+(?:[,.]\d+)?)(?:\s*(?:mėn|men)\.?)?/i;
-
-  const PASS_RE = /\b(?:[A-Z]{2}-\d+|\d{4,12})\b/;
-
-  const sexMatch = findSexMatch(rest);
-  const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
-
-  const beforeSex = sexMatch ? rest.slice(0, sexMatch.index).trim() : "";
-  const name = cleanName(beforeSex);
-
-  const afterSexIdx = sexMatch ? sexMatch.index + sexMatch[0].length : 0;
-  const afterSex = rest.slice(afterSexIdx).trim();
-
-  const dateMatch = afterSex.match(DATE_RE) || rest.match(DATE_RE);
-  const dateRaw = dateMatch ? dateMatch[0] : null;
-  const birthDate = toISO(dateRaw);
-
-  let ageMonths = null;
-  let breedRaw = null;
-  let passport = null;
-
-  if (dateRaw) {
-    const datePosInAfterSex = afterSex.indexOf(dateRaw);
-
-    if (datePosInAfterSex !== -1) {
-      breedRaw = afterSex.slice(0, datePosInAfterSex).trim();
-
-      const afterDate = afterSex
-        .slice(datePosInAfterSex + dateRaw.length)
-        .trim();
-
-      const ageMatch = afterDate.match(AGE_RE);
-
-      if (ageMatch) {
-        ageMonths = parseAge(ageMatch[1]);
-
-        const afterAge = afterDate
-          .slice(ageMatch[0].length)
-          .trim();
-
-        const passMatch = afterAge.match(PASS_RE);
-        passport = passMatch ? passMatch[0] : null;
-      } else {
-        const passMatch = afterDate.match(PASS_RE);
-        passport = passMatch ? passMatch[0] : null;
-      }
-    } else {
-      const datePosInRest = rest.indexOf(dateRaw);
-
-      if (datePosInRest !== -1) {
-        if (sexMatch) {
-          const sexEnd = sexMatch.index + sexMatch[0].length;
-          breedRaw = rest.slice(sexEnd, datePosInRest).trim();
-        } else {
-          breedRaw = rest.slice(0, datePosInRest).trim();
-        }
-
-        const afterDate = rest.slice(datePosInRest + dateRaw.length).trim();
-        const ageMatch = afterDate.match(AGE_RE);
-
-        if (ageMatch) {
-          ageMonths = parseAge(ageMatch[1]);
-
-          const afterAge = afterDate
-            .slice(ageMatch[0].length)
-            .trim();
-
-          const passMatch = afterAge.match(PASS_RE);
-          passport = passMatch ? passMatch[0] : null;
-        } else {
-          const passMatch = afterDate.match(PASS_RE);
-          passport = passMatch ? passMatch[0] : null;
-        }
-      }
-    }
-  }
-
-  let row = {
-    row_index: rowIndex,
-    species,
-    species_label: speciesRaw,
-    tag_no: tag,
-    name,
-    sex,
-    breed: cleanBreed(normalizeBreedSpacing(breedRaw)),
-    birth_date: birthDate,
-    age_months: ageMonths,
-    passport,
-    row_type: "individual",
-    source: "vic_pdf",
-  };
-
-  row = splitSexFromBreedIfNeeded(row);
-
-  if (
-    row.row_index &&
-    row.species &&
-    row.tag_no &&
-    /^(?:[A-Z]{2,3}\d+|\d+)$/i.test(row.tag_no) &&
-    row.birth_date
-  ) {
-    return row;
-  }
-
-  return null;
+  return /^(?:[A-Z]{2,3}\d+|\d{8,20})$/i.test(String(tag).trim());
 }
 
-// ---------- individual parser ----------
+// ---------- individual animal parser ----------
 function parseIndividualAnimalsFromText(originalText) {
   const text = normalizeText(originalText || "");
+  const oneLine = normalizeOneLine(text);
 
   const { allLines, headerIdx, startIdx, foundHeader } = getHeaderDebug(text);
 
-  if (!foundHeader) {
-    return {
-      rows: [],
-      debug: {
-        headerIdx,
-        totalLines: allLines.length,
-        startIdx,
-        foundHeader: false,
-        rawHeadsFound: 0,
-        rawHeadsFoundNormalized: 0,
-        lineSegmentsFound: 0,
-      },
+  // This parser does NOT depend on row line starts.
+  // It directly finds:
+  // index + species + tag + middle + birth_date + age + optional passport
+  const rowRe = new RegExp(
+    [
+      `(\\d{1,6})`,                            // row index
+      `\\s*(${SPECIES_WORDS})`,                // species
+      `\\s*((?:[A-Z]{2,3}\\d+|\\d{8,20}))`,   // tag number / horse chip
+      `\\s*([\\s\\S]*?)`,                      // name + sex + breed
+      `(\\d{4}[-./]\\d{2}[-./]\\d{2}|\\d{2}[-./]\\d{2}[-./]\\d{4})`, // date
+      `\\s*(\\d+(?:[,.]\\d+)?)`,              // age
+      `(?:\\s*((?:[A-Z]{2}-\\d+|\\d{4,12})))?` // optional passport
+    ].join(""),
+    "gi"
+  );
+
+  const rows = [];
+  let m;
+
+  while ((m = rowRe.exec(oneLine)) !== null) {
+    const rowIndex = Number(m[1]);
+    const speciesRaw = m[2];
+    const tag = m[3];
+    const middle = m[4];
+    const dateRaw = m[5];
+    const ageRaw = m[6];
+    const passportRaw = m[7] || null;
+
+    const species = normalizeLithuanianSpecies(speciesRaw);
+
+    const { name, sex, breed } = splitMiddleIntoNameSexBreed(middle);
+
+    let row = {
+      row_index: rowIndex,
+      species,
+      species_label: speciesRaw,
+      tag_no: tag,
+      name,
+      sex,
+      breed,
+      birth_date: toISO(dateRaw),
+      age_months: parseAge(ageRaw),
+      passport: passportRaw,
+      row_type: "individual",
+      source: "vic_pdf",
     };
-  }
 
-  // This is now the main parser: line segments.
-  // It catches PDFs where body regex fails.
-  const rowStartLineRe =
-    /^(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+((?:[A-Z]{2,3}\d+|\d{8,20}))(?:\s+.*)?$/u;
+    row = fixSexBreed(row);
 
-  const segments = [];
-  let current = null;
-
-  for (const rawLine of allLines) {
-    const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!line) continue;
-
-    const startMatch = line.match(rowStartLineRe);
-
-    if (startMatch && isLikelyIndividualSpecies(startMatch[2])) {
-      if (current) segments.push(current);
-      current = line;
-      continue;
-    }
-
-    if (current) {
-      if (shouldStopLine(line)) {
-        segments.push(current);
-        current = null;
-        continue;
-      }
-
-      // Continuation line, for wrapped names/breeds.
-      current += " " + line;
+    if (
+      row.row_index &&
+      row.species &&
+      isValidTag(row.tag_no) &&
+      row.birth_date
+    ) {
+      rows.push(row);
     }
   }
 
-  if (current) segments.push(current);
-
-  const lineRows = [];
-
-  for (const segment of segments) {
-    const row = parseIndividualRowSegment(segment);
-    if (row) lineRows.push(row);
-  }
-
-  // Dedup by species + tag
   const seen = new Set();
 
-  const unique = lineRows.filter((r) => {
+  const unique = rows.filter((r) => {
     const key = `${r.species}:${r.tag_no}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -445,12 +330,10 @@ function parseIndividualAnimalsFromText(originalText) {
       headerIdx,
       totalLines: allLines.length,
       startIdx,
-      foundHeader: true,
+      foundHeader,
       matched: unique.length,
-      rawHeadsFound: 0,
-      rawHeadsFoundNormalized: 0,
-      lineSegmentsFound: segments.length,
-      parser_mode: "line_segments",
+      dateAnchoredMatches: rows.length,
+      parser_mode: "date_anchored_global",
     },
   };
 }
@@ -478,15 +361,25 @@ function parseGroupedAnimalsFromText(originalText) {
       continue;
     }
 
-    if (insideGroupedTable && shouldStopLine(line)) {
+    if (
+      insideGroupedTable &&
+      (/www\.zudc\.lt/i.test(line) ||
+        /Gyvų gyvūnų sąrašas/i.test(line) ||
+        /Deklaruota\s+gyvūnų/i.test(line) ||
+        /^\d+\.\s+Laikytojas/i.test(line) ||
+        /Iš\s+viso\s+ataskaitoje/i.test(line) ||
+        /Iš\s+viso\s+registruota\s+grupėmis/i.test(line))
+    ) {
       insideGroupedTable = false;
       continue;
     }
 
     if (!insideGroupedTable) continue;
 
-    const rowRe =
-      /^(\d{1,6})\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)\s+(.+?)\s+(\d+(?:[,.]\d+)?)\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)$/u;
+    const rowRe = new RegExp(
+      `^(\\d{1,6})\\s+(${GROUPED_SPECIES_WORDS})\\s+(.+?)\\s+(\\d+(?:[,.]\\d+)?)\\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)$`,
+      "iu"
+    );
 
     const m = line.match(rowRe);
 
@@ -509,6 +402,29 @@ function parseGroupedAnimalsFromText(originalText) {
       unit,
       row_type: "group",
       source: "vic_pdf",
+    });
+  }
+
+  // Also parse final summary grouped section:
+  // Vištos (Iš viso) 9 vnt.
+  const summaryRe = new RegExp(
+    `(${GROUPED_SPECIES_WORDS})\\s*\\((.*?)\\)\\s+(\\d+(?:[,.]\\d+)?)\\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)`,
+    "giu"
+  );
+
+  let sm;
+  let syntheticIndex = 100000;
+
+  while ((sm = summaryRe.exec(text)) !== null) {
+    groups.push({
+      row_index: syntheticIndex++,
+      species: normalizeLithuanianSpecies(sm[1]),
+      species_label: sm[1],
+      group: sm[2].trim(),
+      animal_count: parseCount(sm[3]),
+      unit: sm[4].trim(),
+      row_type: "group",
+      source: "vic_pdf_summary",
     });
   }
 
