@@ -42,6 +42,21 @@ function parseAge(raw) {
   return n;
 }
 
+function normalizeBreedSpacing(s) {
+  if (!s) return null;
+
+  return String(s)
+    // Insert missing space when pdf-parse glues sex + breed:
+    // BuliukasHolšteinai -> Buliukas Holšteinai
+    // TelyčaitėLietuvos žalieji -> Telyčaitė Lietuvos žalieji
+    .replace(
+      /(Buliukas|Bulius|Karvė|Karve|Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia)(?=[A-ZĄČĘĖĮŠŲŪŽ])/g,
+      "$1 "
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function cleanBreed(s) {
   if (!s) return null;
 
@@ -52,9 +67,62 @@ function cleanBreed(s) {
     .replace(/\bSugrupuota statistika\b/gi, "")
     .replace(/\bIš viso ataskaitoje\b/gi, "")
     .replace(/\bIš viso registruota grupėmis\b/gi, "")
+
+    // Remove sex if it somehow still leaked into breed
+    .replace(
+      /^(Buliukas|Bulius|Karvė|Karve|Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia)\s*/i,
+      ""
+    )
+
     .trim();
 
   return cleaned || null;
+}
+
+function findSexMatch(slice) {
+  if (!slice) return null;
+
+  const normalized = normalizeBreedSpacing(slice);
+
+  // No strict word boundary, because pdf-parse can glue:
+  // BuliukasHolšteinai
+  // KarvėHolšteinai
+  // TelyčaitėLietuvos žalieji
+  const SEX_RE =
+    /(Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia|Buliukas|Bulius|Karvė|Karve)/i;
+
+  return normalized.match(SEX_RE);
+}
+
+function splitSexFromBreedIfNeeded(row) {
+  if (!row) return row;
+
+  // If sex is already detected, just make sure breed is clean
+  if (row.sex) {
+    row.breed = cleanBreed(normalizeBreedSpacing(row.breed));
+    return row;
+  }
+
+  const breed = row.breed ? normalizeBreedSpacing(row.breed) : "";
+
+  if (!breed) return row;
+
+  // Handles:
+  // BuliukasHolšteinai
+  // Buliukas Lietuvos žalieji
+  // TelyčaitėLietuvos žalieji
+  // KarvėHolšteinai
+  const gluedSexRe =
+    /^(Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia|Buliukas|Bulius|Karvė|Karve)\s*(.*)$/i;
+
+  const m = breed.match(gluedSexRe);
+
+  if (!m) return row;
+
+  row.sex = normalizeSex(m[1]);
+  row.breed = cleanBreed(m[2]);
+
+  return row;
 }
 
 // ---------- core parser ----------
@@ -92,7 +160,8 @@ function parseAnimalsFromText(text) {
   let body = originalText.slice(startIdx);
 
   // Cut off the summary/statistics/footer after the real animal table.
-  // This prevents the last animal from eating "Karvė Iš viso: 758..." etc.
+  // This prevents the last animal from eating:
+  // "Karvė Iš viso: 758..."
   const stopMatch = body.search(
     /(?:Sugrupuota\s+statistika|Iš\s+viso\s+ataskaitoje|Iš\s+viso\s+registruota\s+grupėmis)/i
   );
@@ -102,13 +171,9 @@ function parseAnimalsFromText(text) {
   }
 
   // Row head: index + Galvijai + tag.
-  // IMPORTANT:
-  // Use \s* around "Galvijai" because pdf-parse sometimes gives:
+  // Use \s* because pdf-parse sometimes outputs:
   // "1 GalvijaiDE000..." or weird hidden spacing.
   const headRe = /(\d{1,6})\s*Galvijai\s*((?:DE|LT)\d{9,15})/gi;
-
-  const SEX_RE =
-    /\b(Karvė|Karve|Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)\b/i;
 
   const DATE_RE =
     /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})/;
@@ -136,13 +201,12 @@ function parseAnimalsFromText(text) {
     const next = heads[i + 1];
 
     // End row before the next row starts.
-    // This is the main fix for row bleeding.
     const sliceEnd = next ? next.headStart : body.length;
 
     const rawSlice = body.slice(current.dataStart, sliceEnd);
-    const slice = rawSlice.replace(/\s+/g, " ").trim();
+    const slice = normalizeBreedSpacing(rawSlice.replace(/\s+/g, " ").trim());
 
-    const sexMatch = slice.match(SEX_RE);
+    const sexMatch = findSexMatch(slice);
     const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
 
     const afterSexIdx = sexMatch ? sexMatch.index + sexMatch[0].length : 0;
@@ -171,17 +235,15 @@ function parseAnimalsFromText(text) {
           ageMonths = parseAge(ageMatch[1]);
         }
       } else {
-        // fallback if date was found in full slice but not after sex
+        // Fallback if date was found in full slice but not after sex
         const datePosInSlice = slice.indexOf(dateRaw);
 
         if (datePosInSlice !== -1) {
-          const beforeDate = slice.slice(0, datePosInSlice).trim();
-
           if (sexMatch) {
             const sexEndInSlice = sexMatch.index + sexMatch[0].length;
             breedRaw = slice.slice(sexEndInSlice, datePosInSlice).trim();
           } else {
-            breedRaw = beforeDate;
+            breedRaw = slice.slice(0, datePosInSlice).trim();
           }
 
           const afterDate = slice.slice(datePosInSlice + dateRaw.length).trim();
@@ -197,20 +259,24 @@ function parseAnimalsFromText(text) {
     const passMatch = slice.match(PASS_RE);
     const passport = passMatch ? passMatch[0] : null;
 
-    const row = {
+    let row = {
       row_index: current.idx,
       species: "galvijai",
       tag_no: current.tag,
       name: null,
       sex,
-      breed: cleanBreed(breedRaw),
+      breed: cleanBreed(normalizeBreedSpacing(breedRaw)),
       birth_date: birthDate,
       age_months: ageMonths,
       passport,
     };
 
-    // Safety filter:
-    // Keep only actual animal rows.
+    // Final safety repair:
+    // If sex was missed and breed became "BuliukasHolšteinai",
+    // split it here.
+    row = splitSexFromBreedIfNeeded(row);
+
+    // Keep only actual animal rows
     if (
       row.row_index &&
       row.tag_no &&
