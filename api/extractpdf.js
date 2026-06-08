@@ -6,11 +6,11 @@ function toISO(d) {
   if (!d) return null;
 
   // YYYY[-./]MM[-./]DD
-  let m = d.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
+  let m = String(d).match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
 
   // DD[-./]MM[-./]YYYY
-  m = d.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
+  m = String(d).match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
 
   return null;
@@ -30,13 +30,13 @@ function normalizeSex(s) {
 }
 
 function parseAge(raw) {
-  if (!raw) return null;
+  if (raw === null || raw === undefined || raw === "") return null;
 
   const n = Number(String(raw).replace(",", "."));
 
   if (!Number.isFinite(n)) return null;
 
-  // Protect against garbage from summary blocks like "758"
+  // Prevent summary garbage like 758 from becoming animal age
   if (n < 0 || n > 300) return null;
 
   return n;
@@ -91,9 +91,8 @@ function parseAnimalsFromText(text) {
 
   let body = originalText.slice(startIdx);
 
-  // CRITICAL FIX:
-  // Cut off summary/footer blocks after the real animal table.
-  // Without this, the final animal eats "Sugrupuota statistika", "Karvė Iš viso: 758", etc.
+  // Cut off the summary/statistics/footer after the real animal table.
+  // This prevents the last animal from eating "Karvė Iš viso: 758..." etc.
   const stopMatch = body.search(
     /(?:Sugrupuota\s+statistika|Iš\s+viso\s+ataskaitoje|Iš\s+viso\s+registruota\s+grupėmis)/i
   );
@@ -102,9 +101,11 @@ function parseAnimalsFromText(text) {
     body = body.slice(0, stopMatch);
   }
 
-  // Row head: index + Galvijai + tag
-  // Works both when pdf-parse puts fields in one line and when it puts each cell on separate lines.
-  const headRe = /(\d{1,6})\s+Galvijai\s+((?:DE|LT)\d{9,15})/gi;
+  // Row head: index + Galvijai + tag.
+  // IMPORTANT:
+  // Use \s* around "Galvijai" because pdf-parse sometimes gives:
+  // "1 GalvijaiDE000..." or weird hidden spacing.
+  const headRe = /(\d{1,6})\s*Galvijai\s*((?:DE|LT)\d{9,15})/gi;
 
   const SEX_RE =
     /\b(Karvė|Karve|Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia|Bulius|Buliukas)\b/i;
@@ -134,21 +135,17 @@ function parseAnimalsFromText(text) {
     const current = heads[i];
     const next = heads[i + 1];
 
-    // CRITICAL FIX:
-    // End the row BEFORE the next row head starts.
-    // Your old code ended around next.dataStart, which let the next row leak into the previous slice.
+    // End row before the next row starts.
+    // This is the main fix for row bleeding.
     const sliceEnd = next ? next.headStart : body.length;
-    const rawSlice = body.slice(current.dataStart, sliceEnd);
 
+    const rawSlice = body.slice(current.dataStart, sliceEnd);
     const slice = rawSlice.replace(/\s+/g, " ").trim();
 
     const sexMatch = slice.match(SEX_RE);
     const sex = sexMatch ? normalizeSex(sexMatch[0]) : null;
 
-    const afterSexIdx = sexMatch
-      ? sexMatch.index + sexMatch[0].length
-      : 0;
-
+    const afterSexIdx = sexMatch ? sexMatch.index + sexMatch[0].length : 0;
     const afterSex = slice.slice(afterSexIdx).trim();
 
     const dateMatch = afterSex.match(DATE_RE) || slice.match(DATE_RE);
@@ -158,7 +155,7 @@ function parseAnimalsFromText(text) {
     let ageMonths = null;
     let breedRaw = null;
 
-    if (dateMatch) {
+    if (dateMatch && dateRaw) {
       const datePosInAfterSex = afterSex.indexOf(dateRaw);
 
       if (datePosInAfterSex !== -1) {
@@ -169,8 +166,30 @@ function parseAnimalsFromText(text) {
           .trim();
 
         const ageMatch = afterDate.match(AGE_RE);
+
         if (ageMatch) {
           ageMonths = parseAge(ageMatch[1]);
+        }
+      } else {
+        // fallback if date was found in full slice but not after sex
+        const datePosInSlice = slice.indexOf(dateRaw);
+
+        if (datePosInSlice !== -1) {
+          const beforeDate = slice.slice(0, datePosInSlice).trim();
+
+          if (sexMatch) {
+            const sexEndInSlice = sexMatch.index + sexMatch[0].length;
+            breedRaw = slice.slice(sexEndInSlice, datePosInSlice).trim();
+          } else {
+            breedRaw = beforeDate;
+          }
+
+          const afterDate = slice.slice(datePosInSlice + dateRaw.length).trim();
+          const ageMatch = afterDate.match(AGE_RE);
+
+          if (ageMatch) {
+            ageMonths = parseAge(ageMatch[1]);
+          }
         }
       }
     }
@@ -191,12 +210,11 @@ function parseAnimalsFromText(text) {
     };
 
     // Safety filter:
-    // Only keep rows that actually look like animal rows.
-    // This prevents footer/statistic garbage from entering the result.
+    // Keep only actual animal rows.
     if (
       row.row_index &&
       row.tag_no &&
-      /^(DE|LT)\d{9,15}$/i.test(row.tag_no) &&
+      /^(DE|LT)\d+$/i.test(row.tag_no) &&
       row.birth_date
     ) {
       rows.push(row);
@@ -205,6 +223,7 @@ function parseAnimalsFromText(text) {
 
   // Dedup by tag, keep first
   const seen = new Set();
+
   const unique = rows.filter((r) => {
     if (seen.has(r.tag_no)) return false;
     seen.add(r.tag_no);
