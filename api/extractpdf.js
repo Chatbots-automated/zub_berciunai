@@ -3,475 +3,498 @@
 const pdfParse = require("pdf-parse");
 
 // ============================================================
-// HELPERS
+// BASIC HELPERS
 // ============================================================
 
-function toISO(d) {
-  if (!d) return null;
+function toISO(value) {
+  if (!value) return null;
 
-  let m = String(d).match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
+  const s = String(value).trim();
 
-  if (m) {
-    return `${m[1]}-${m[2]}-${m[3]}`;
+  let match = s.match(
+    /^(\d{4})[-./](\d{2})[-./](\d{2})$/
+  );
+
+  if (match) {
+    return `${match[1]}-${match[2]}-${match[3]}`;
   }
 
-  m = String(d).match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
+  match = s.match(
+    /^(\d{2})[-./](\d{2})[-./](\d{4})$/
+  );
 
-  if (m) {
-    return `${m[3]}-${m[2]}-${m[1]}`;
+  if (match) {
+    return `${match[3]}-${match[2]}-${match[1]}`;
   }
 
   return null;
 }
 
-function normalizeText(s) {
-  return String(s || "")
+function normalizeText(value) {
+  return String(value || "")
     .replace(/\u00A0/g, " ")
     .replace(/\r/g, "\n")
     .replace(/[ \t]+/g, " ");
 }
 
-function normalizeOneLine(s) {
-  return normalizeText(s)
+function normalizeOneLine(value) {
+  return normalizeText(value)
     .replace(/\n+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function cleanValue(value) {
-  if (value === null || value === undefined) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
     return null;
   }
 
-  const cleaned = String(value)
+  const result = String(value)
     .replace(/\s+/g, " ")
     .trim();
 
-  return cleaned || null;
+  return result || null;
 }
 
 function normalizeCompact(value) {
-  if (value === null || value === undefined) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
     return null;
   }
 
-  const cleaned = String(value)
+  const result = String(value)
     .replace(/\s+/g, "")
     .trim();
 
-  return cleaned || null;
+  return result || null;
 }
 
-function normalizeLithuanianSpecies(s) {
-  if (!s) return null;
+function onlyDigits(value) {
+  if (!value) return null;
 
-  const x = String(s)
+  const result = String(value)
+    .replace(/\D/g, "")
+    .trim();
+
+  return result || null;
+}
+
+// ============================================================
+// SPECIES / SEX
+// ============================================================
+
+function normalizeLithuanianSpecies(value) {
+  if (!value) return null;
+
+  const v = String(value)
     .trim()
     .toLowerCase();
 
   const map = {
     galvijai: "galvijai",
+    galvijas: "galvijai",
+
     arkliai: "arkliai",
+    arklys: "arkliai",
+
     avys: "avys",
     avis: "avys",
+
     ožkos: "ozkos",
     ozkos: "ozkos",
+
     kiaulės: "kiaules",
     kiaules: "kiaules",
+
     vištos: "vistos",
     vistos: "vistos",
+
     triušiai: "triusiai",
     triusiai: "triusiai",
+
     paukščiai: "pauksciai",
     pauksciai: "pauksciai"
   };
 
-  return map[x] || x;
+  return map[v] || v;
 }
 
-function normalizeSex(s) {
-  if (!s) return null;
+function normalizeSex(value) {
+  if (!value) return null;
 
-  const x = String(s)
+  const v = String(value)
     .trim()
     .toLowerCase();
 
-  if (x.startsWith("buliuk")) return "Buliukas";
-  if (x.startsWith("buliu")) return "Bulius";
-  if (x.startsWith("karv")) return "Karvė";
-  if (x.startsWith("tely")) return "Telyčaitė";
+  if (v.startsWith("buliuk")) {
+    return "Buliukas";
+  }
+
+  if (v.startsWith("buliu")) {
+    return "Bulius";
+  }
+
+  if (v.startsWith("karv")) {
+    return "Karvė";
+  }
+
+  if (v.startsWith("tely")) {
+    return "Telyčaitė";
+  }
 
   if (
-    x.startsWith("eržil") ||
-    x.startsWith("erzil")
+    v.startsWith("eržil") ||
+    v.startsWith("erzil")
   ) {
     return "Eržilas";
   }
 
-  if (x.startsWith("kumel")) return "Kumelė";
-  if (x.startsWith("kastr")) return "Kastratas";
+  if (v.startsWith("kumel")) {
+    return "Kumelė";
+  }
 
-  if (x.startsWith("avinas")) return "Avinas";
-  if (x.startsWith("avis")) return "Avis";
+  if (v.startsWith("kastr")) {
+    return "Kastratas";
+  }
+
+  if (v.startsWith("avinas")) {
+    return "Avinas";
+  }
+
+  if (v.startsWith("avis")) {
+    return "Avis";
+  }
 
   if (
-    x.startsWith("ėriuk") ||
-    x.startsWith("eriuk")
+    v.startsWith("ėriuk") ||
+    v.startsWith("eriuk")
   ) {
     return "Ėriukas";
   }
 
   if (
-    x.startsWith("ožka") ||
-    x.startsWith("ozka")
+    v.startsWith("ožka") ||
+    v.startsWith("ozka")
   ) {
     return "Ožka";
   }
 
   if (
-    x.startsWith("ožys") ||
-    x.startsWith("ozys")
+    v.startsWith("ožys") ||
+    v.startsWith("ozys")
   ) {
     return "Ožys";
   }
 
   if (
-    x.startsWith("paršav") ||
-    x.startsWith("parsav")
+    v.startsWith("paršav") ||
+    v.startsWith("parsav")
   ) {
     return "Paršavedė";
   }
 
-  if (x.startsWith("kuil")) {
+  if (v.startsWith("kuil")) {
     return "Kuilys";
   }
 
   return (
-    String(s).charAt(0).toUpperCase() +
-    String(s).slice(1).toLowerCase()
+    String(value)
+      .charAt(0)
+      .toUpperCase() +
+    String(value)
+      .slice(1)
+      .toLowerCase()
   );
 }
 
-function parseAge(raw) {
+function parseAge(value) {
   if (
-    raw === null ||
-    raw === undefined ||
-    raw === ""
+    value === null ||
+    value === undefined ||
+    value === ""
   ) {
     return null;
   }
 
-  const n = Number(
-    String(raw).replace(",", ".")
+  const number = Number(
+    String(value).replace(",", ".")
   );
 
-  if (!Number.isFinite(n)) return null;
-  if (n < 0 || n > 400) return null;
+  if (!Number.isFinite(number)) {
+    return null;
+  }
 
-  return n;
-}
-
-function parseCount(raw) {
   if (
-    raw === null ||
-    raw === undefined ||
-    raw === ""
+    number < 0 ||
+    number > 400
   ) {
     return null;
   }
 
-  const n = Number(
-    String(raw).replace(",", ".")
-  );
+  return number;
+}
 
-  if (!Number.isFinite(n)) {
+function parseCount(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
     return null;
   }
 
-  return n;
+  const number = Number(
+    String(value).replace(",", ".")
+  );
+
+  return Number.isFinite(number)
+    ? number
+    : null;
 }
 
 // ============================================================
-// PDF HEADER / FARM METADATA
+// VIC DOCUMENT METADATA
 // ============================================================
 
 function parseDocumentMetadata(originalText) {
   const normalized =
     normalizeText(originalText || "");
 
-  const tableStartMatch =
-    normalized.match(/Eil\.\s*Nr\./i);
+  /*
+   * Only use the first header.
+   *
+   * Everything before:
+   * Eil. Nr. Rūšis Numeris...
+   */
+  const tableStart =
+    normalized.search(
+      /Eil\.\s*Nr\./i
+    );
 
   const headerText =
-    tableStartMatch &&
-    tableStartMatch.index !== undefined
+    tableStart >= 0
       ? normalized.slice(
           0,
-          tableStartMatch.index
+          tableStart
         )
-      : normalized.slice(0, 8000);
+      : normalized.slice(
+          0,
+          10000
+        );
 
-  const headerOneLine = headerText
-    .replace(/\n+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  const oneLine =
+    normalizeOneLine(
+      headerText
+    );
 
-  const lines = headerText
-    .split(/\n+/)
-    .map((line) =>
-      line
-        .replace(/\s+/g, " ")
-        .trim()
-    )
-    .filter(Boolean);
+  /*
+   * pdf-parse sometimes does this:
+   *
+   * DALIA KAIRAITIENĖValda1003923779Banda10662800013
+   *
+   * Therefore we keep a completely compact version too.
+   */
+  const compact =
+    headerText
+      .replace(/\s+/g, "");
 
   const metadata = {
     holder_name: null,
-    client_personal_code: null,
-    holding_code: null,
-    herd_code: null,
-    holder_type: null,
-    declared_species: null,
-    holder_address: null,
-    herd_address: null,
-    registration_date: null
+
+    client_personal_code:
+      null,
+
+    holding_code:
+      null,
+
+    herd_code:
+      null,
+
+    holder_type:
+      null,
+
+    declared_species:
+      null,
+
+    holder_address:
+      null,
+
+    herd_address:
+      null,
+
+    registration_date:
+      null
   };
-
-  function firstMatch(
-    patterns,
-    text = headerOneLine
-  ) {
-    for (const pattern of patterns) {
-      const match = text.match(pattern);
-
-      if (
-        match &&
-        match[1] !== undefined &&
-        match[1] !== null
-      ) {
-        const cleaned =
-          cleanValue(match[1]);
-
-        if (cleaned) {
-          return cleaned;
-        }
-      }
-    }
-
-    return null;
-  }
-
-  function digitsOnly(value) {
-    if (!value) return null;
-
-    const digits = String(value)
-      .replace(/\D/g, "")
-      .trim();
-
-    return digits || null;
-  }
-
-  function findLineValue(patterns) {
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      for (const pattern of patterns) {
-        const match = line.match(pattern);
-
-        if (!match) continue;
-
-        if (match[1]) {
-          const value =
-            cleanValue(match[1]);
-
-          if (value) {
-            return value;
-          }
-        }
-
-        if (lines[i + 1]) {
-          return cleanValue(
-            lines[i + 1]
-          );
-        }
-      }
-    }
-
-    return null;
-  }
 
   // ==========================================================
   // PERSONAL / COMPANY CODE
   // ==========================================================
 
-  let personalCode = firstMatch([
-    /Asmens\s*\/\s*įmonės\s*kodas\s*[:\-]?\s*(\d{8,13})/iu,
-    /Asmens\s*\/\s*imones\s*kodas\s*[:\-]?\s*(\d{8,13})/iu,
-    /Asmens\s*\/?\s*įmonės\s*kodas[\s:;\-]*(\d{8,13})/iu,
-    /Asmens\s*\/?\s*imones\s*kodas[\s:;\-]*(\d{8,13})/iu
-  ]);
+  let match =
+    compact.match(
+      /Asmens\/(?:įmonės|imones)kodas(\d{8,13})/iu
+    );
 
-  if (!personalCode) {
-    const lineValue = findLineValue([
-      /Asmens\s*\/\s*įmonės\s*kodas\s*[:\-]?\s*(.*)$/iu,
-      /Asmens\s*\/\s*imones\s*kodas\s*[:\-]?\s*(.*)$/iu
-    ]);
-
-    if (lineValue) {
-      const codeMatch =
-        lineValue.match(
-          /\b\d{8,13}\b/
-        );
-
-      if (codeMatch) {
-        personalCode =
-          codeMatch[0];
-      }
-    }
+  if (!match) {
+    match =
+      oneLine.match(
+        /Asmens\s*\/\s*(?:įmonės|imones)\s*kodas\s*[:\-]?\s*(\d{8,13})/iu
+      );
   }
 
-  metadata.client_personal_code =
-    digitsOnly(personalCode);
+  if (match?.[1]) {
+    metadata.client_personal_code =
+      onlyDigits(
+        match[1]
+      );
+  }
 
   // ==========================================================
   // VALDA
+  //
+  // Important:
+  // DO NOT require a word boundary AFTER "Valda".
+  //
+  // It can be:
+  // Valda1003923779
   // ==========================================================
 
-  let holdingCode = firstMatch([
-    /\bValda\s*[:\-]?\s*(\d{6,15})\b/iu,
-    /\bValdos\s+kodas\s*[:\-]?\s*(\d{6,15})\b/iu
-  ]);
+  match =
+    compact.match(
+      /Valda(\d{6,15})/iu
+    );
 
-  if (!holdingCode) {
-    const lineValue = findLineValue([
-      /\bValda\s*[:\-]?\s*(.*)$/iu,
-      /\bValdos\s+kodas\s*[:\-]?\s*(.*)$/iu
-    ]);
-
-    if (lineValue) {
-      const codeMatch =
-        lineValue.match(
-          /\b\d{6,15}\b/
-        );
-
-      if (codeMatch) {
-        holdingCode =
-          codeMatch[0];
-      }
-    }
+  if (!match) {
+    match =
+      oneLine.match(
+        /Valda\s*[:\-]?\s*(\d{6,15})/iu
+      );
   }
 
-  metadata.holding_code =
-    digitsOnly(holdingCode);
+  if (match?.[1]) {
+    metadata.holding_code =
+      onlyDigits(
+        match[1]
+      );
+  }
 
   // ==========================================================
   // BANDA
   // ==========================================================
 
-  let herdCode = firstMatch([
-    /\bBanda\s*[:\-]?\s*(\d{6,15})\b/iu,
-    /\bBandos\s+kodas\s*[:\-]?\s*(\d{6,15})\b/iu
-  ]);
+  match =
+    compact.match(
+      /Banda(\d{6,15})/iu
+    );
 
-  if (!herdCode) {
-    const lineValue = findLineValue([
-      /\bBanda\s*[:\-]?\s*(.*)$/iu,
-      /\bBandos\s+kodas\s*[:\-]?\s*(.*)$/iu
-    ]);
-
-    if (lineValue) {
-      const codeMatch =
-        lineValue.match(
-          /\b\d{6,15}\b/
-        );
-
-      if (codeMatch) {
-        herdCode =
-          codeMatch[0];
-      }
-    }
+  if (!match) {
+    match =
+      oneLine.match(
+        /Banda\s*[:\-]?\s*(\d{6,15})/iu
+      );
   }
 
-  metadata.herd_code =
-    digitsOnly(herdCode);
+  if (match?.[1]) {
+    metadata.herd_code =
+      onlyDigits(
+        match[1]
+      );
+  }
 
   // ==========================================================
   // HOLDER NAME
   // ==========================================================
 
-  metadata.holder_name = firstMatch([
-    /(?:^|\s)\d+\.\s*Laikytojas\s+(.+?)(?=\s*(?:Valda|Banda|Asmens\s*\/|Tipas|Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu,
+  match =
+    oneLine.match(
+      /(?:\d+\.\s*)?Laikytojas\s*(.+?)(?=\s*Valda\s*\d|\s*Banda\s*\d|\s*Asmens\s*\/)/iu
+    );
 
-    /(?:^|\s)Laikytojas\s+(.+?)(?=\s*(?:Valda|Banda|Asmens\s*\/|Tipas|Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu
-  ]);
+  if (match?.[1]) {
+    metadata.holder_name =
+      cleanValue(
+        match[1]
+      );
+  }
 
-  if (!metadata.holder_name) {
-    const holderLine =
-      findLineValue([
-        /(?:\d+\.\s*)?Laikytojas\s*[:\-]?\s*(.*)$/iu
-      ]);
+  // Fallback when values are fully glued
+  if (
+    !metadata.holder_name
+  ) {
+    const holderStart =
+      compact.search(
+        /Laikytojas/iu
+      );
 
-    if (holderLine) {
+    const valdaStart =
+      compact.search(
+        /Valda\d/iu
+      );
+
+    if (
+      holderStart >= 0 &&
+      valdaStart >
+        holderStart
+    ) {
+      let value =
+        compact.slice(
+          holderStart +
+            "Laikytojas".length,
+          valdaStart
+        );
+
+      /*
+       * Compact fallback cannot reconstruct
+       * spaces in full names perfectly.
+       *
+       * Usually normal oneLine parsing above
+       * succeeds first.
+       */
       metadata.holder_name =
-        holderLine
-          .replace(
-            /Valda\s*\d+.*$/iu,
-            ""
-          )
-          .replace(
-            /Banda\s*\d+.*$/iu,
-            ""
-          )
-          .replace(
-            /Asmens\s*\/.*$/iu,
-            ""
-          )
-          .trim() || null;
+        cleanValue(value);
     }
   }
 
   // ==========================================================
-  // HOLDER TYPE
+  // TYPE
+  //
+  // Handles:
+  // Tipas Valdytojas Rūšis Galvijai
+  // TipasValdytojasRūšisGalvijai
   // ==========================================================
 
-  metadata.holder_type = firstMatch([
-    /\bTipas\s*[:\-]?\s*(.+?)(?=\s+(?:Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu
-  ]);
+  match =
+    oneLine.match(
+      /Tipas\s*(.+?)(?=\s*Rūšis|\s*Rusis)/iu
+    );
 
-  if (!metadata.holder_type) {
-    const typeLine =
-      findLineValue([
-        /\bTipas\s*[:\-]?\s*(.*)$/iu
-      ]);
-
-    if (typeLine) {
-      metadata.holder_type =
-        typeLine
-          .replace(
-            /\s+Rūšis\b.*$/iu,
-            ""
-          )
-          .replace(
-            /\s+Rusis\b.*$/iu,
-            ""
-          )
-          .trim() || null;
-    }
+  if (match?.[1]) {
+    metadata.holder_type =
+      cleanValue(
+        match[1]
+      );
   }
 
   // ==========================================================
-  // DECLARED SPECIES
+  // SPECIES
   // ==========================================================
 
-  const speciesRaw = firstMatch([
-    /\bRūšis\s*[:\-]?\s*([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)/iu,
-    /\bRusis\s*[:\-]?\s*([A-Za-z]+)/iu
-  ]);
+  match =
+    oneLine.match(
+      /(?:Rūšis|Rusis)\s*(.+?)(?=\s*Laikytojo\s*adresas|\s*Įregistravimo|\s*Iregistravimo|\s*Eil\.)/iu
+    );
 
-  if (speciesRaw) {
+  if (match?.[1]) {
     metadata.declared_species =
       normalizeLithuanianSpecies(
-        speciesRaw
+        cleanValue(
+          match[1]
+        )
       );
   }
 
@@ -479,47 +502,65 @@ function parseDocumentMetadata(originalText) {
   // HOLDER ADDRESS
   // ==========================================================
 
-  metadata.holder_address =
-    firstMatch([
-      /Laikytojo\s+adresas\s*[:\-]?\s*(.+?)(?=\s+(?:Įregistravimo|Iregistravimo|Bandos\s+adresas|Eil\.\s*Nr\.))/iu
-    ]);
+  match =
+    oneLine.match(
+      /Laikytojo\s*adresas\s*(.+?)(?=\s*Įregistravimo\s*data|\s*Iregistravimo\s*data|\s*Bandos\s*adresas|\s*Eil\.)/iu
+    );
 
-  // ==========================================================
-  // HERD ADDRESS
-  // ==========================================================
-
-  metadata.herd_address =
-    firstMatch([
-      /Bandos\s+adresas\s*[:\-]?\s*(.+?)(?=\s+(?:Eil\.\s*Nr\.|www\.zudc\.lt|Gyvų\s+gyvūnų\s+sąrašas|Sugrupuota|$))/iu
-    ]);
+  if (match?.[1]) {
+    metadata.holder_address =
+      cleanValue(
+        match[1]
+      );
+  }
 
   // ==========================================================
   // REGISTRATION DATE
   // ==========================================================
 
-  const registrationRaw =
-    firstMatch(
-      [
-        /Įregistravimo\s+data[\s\S]{0,120}?(\d{4}[-./]\d{2}[-./]\d{2})/iu,
-        /Iregistravimo\s+data[\s\S]{0,120}?(\d{4}[-./]\d{2}[-./]\d{2})/iu
-      ],
-      headerText
+  match =
+    headerText.match(
+      /(?:Įregistravimo|Iregistravimo)\s*data[\s\S]{0,150}?(\d{4}[-./]\d{2}[-./]\d{2})/iu
     );
 
-  if (registrationRaw) {
+  if (match?.[1]) {
     metadata.registration_date =
-      toISO(registrationRaw);
+      toISO(
+        match[1]
+      );
+  }
+
+  // ==========================================================
+  // HERD ADDRESS
+  // ==========================================================
+
+  match =
+    oneLine.match(
+      /Bandos\s*adresas\s*(.+?)(?=\s*Eil\.\s*Nr\.|$)/iu
+    );
+
+  if (match?.[1]) {
+    metadata.herd_address =
+      cleanValue(
+        match[1]
+      );
   }
 
   return {
     metadata,
 
     debug: {
-      header_lines:
-        lines.slice(0, 40),
+      raw_header:
+        oneLine.slice(
+          0,
+          3000
+        ),
 
-      header_text:
-        headerOneLine.slice(0, 3000)
+      compact_header:
+        compact.slice(
+          0,
+          3000
+        )
     }
   };
 }
@@ -538,13 +579,13 @@ const SEX_WORDS =
   "Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia|Buliukas|Bulius|Karvė|Karve|Eržilas|Erzilas|Kumelė|Kumele|Kastratas|Avis|Avinas|Ėriukas|Eriukas|Ožka|Ozka|Ožys|Ozys|Paršavedė|Parsavede|Kuilys";
 
 // ============================================================
-// BREED / NAME HELPERS
+// NAME / SEX / BREED
 // ============================================================
 
-function normalizeBreedSpacing(s) {
-  if (!s) return null;
+function normalizeBreedSpacing(value) {
+  if (!value) return null;
 
-  return String(s)
+  return String(value)
     .replace(
       new RegExp(
         `(${SEX_WORDS})(?=[A-ZĄČĘĖĮŠŲŪŽ])`,
@@ -556,81 +597,108 @@ function normalizeBreedSpacing(s) {
     .trim();
 }
 
-function cleanBreed(s) {
-  if (!s) return null;
+function cleanBreed(value) {
+  if (!value) return null;
 
-  const cleaned = String(s)
-    .replace(/\s+/g, " ")
-    .replace(/\bwww\.zudc\.lt\b/gi, "")
-    .replace(/\bGyvų gyvūnų sąrašas\b/gi, "")
-    .replace(/\bSugrupuota statistika\b/gi, "")
-    .replace(/\bIš viso ataskaitoje\b/gi, "")
-    .replace(/\bIš viso registruota grupėmis\b/gi, "")
-    .replace(/\bDeklaruota gyvūnų\b/gi, "")
-    .replace(
-      new RegExp(
-        `^(${SEX_WORDS})\\s*`,
-        "i"
-      ),
-      ""
-    )
-    .trim();
+  const result =
+    String(value)
+      .replace(/\s+/g, " ")
 
-  return cleaned || null;
+      .replace(
+        /\bwww\.zudc\.lt\b/gi,
+        ""
+      )
+
+      .replace(
+        /\bGyvų gyvūnų sąrašas\b/gi,
+        ""
+      )
+
+      .replace(
+        /\bSugrupuota statistika\b/gi,
+        ""
+      )
+
+      .replace(
+        /\bIš viso ataskaitoje\b/gi,
+        ""
+      )
+
+      .replace(
+        /\bIš viso registruota grupėmis\b/gi,
+        ""
+      )
+
+      .replace(
+        /\bDeklaruota gyvūnų\b/gi,
+        ""
+      )
+
+      .replace(
+        new RegExp(
+          `^(${SEX_WORDS})\\s*`,
+          "i"
+        ),
+        ""
+      )
+
+      .trim();
+
+  return result || null;
 }
 
-function cleanName(s) {
-  if (!s) return null;
+function cleanName(value) {
+  if (!value) return null;
 
-  let name = String(s)
-    .replace(/\s+/g, " ")
-    .trim();
+  let name =
+    String(value)
+      .replace(/\s+/g, " ")
+      .trim();
 
-  if (!name) return null;
-
-  const onlyUpperNameChars =
-    /^[A-ZĄČĘĖĮŠŲŪŽ\s.'-]+$/u.test(
-      name
-    );
-
-  if (onlyUpperNameChars) {
-    name =
-      name.replace(/\s+/g, "");
+  if (!name) {
+    return null;
   }
 
-  return name || null;
+  return name;
 }
 
-function findSexMatch(s) {
-  if (!s) return null;
+function findSexMatch(value) {
+  if (!value) return null;
 
   const normalized =
-    normalizeBreedSpacing(s);
+    normalizeBreedSpacing(
+      value
+    );
 
-  const re =
+  return normalized.match(
     new RegExp(
       `(${SEX_WORDS})`,
       "i"
-    );
-
-  return normalized.match(re);
+    )
+  );
 }
 
 function splitMiddleIntoNameSexBreed(
   middle
 ) {
-  const cleanMiddle =
+  const cleaned =
     normalizeBreedSpacing(
-      normalizeOneLine(middle)
+      normalizeOneLine(
+        middle
+      )
     );
 
   const sexMatch =
-    findSexMatch(cleanMiddle);
+    findSexMatch(
+      cleaned
+    );
 
   if (!sexMatch) {
     return {
       name:
-        cleanName(cleanMiddle),
+        cleanName(
+          cleaned
+        ),
 
       sex: null,
 
@@ -638,39 +706,47 @@ function splitMiddleIntoNameSexBreed(
     };
   }
 
-  const nameRaw =
-    cleanMiddle
+  const namePart =
+    cleaned
       .slice(
         0,
         sexMatch.index
       )
       .trim();
 
-  const sexRaw =
+  const sexPart =
     sexMatch[0];
 
-  const breedRaw =
-    cleanMiddle
+  const breedPart =
+    cleaned
       .slice(
         sexMatch.index +
-          sexRaw.length
+          sexPart.length
       )
       .trim();
 
   return {
     name:
-      cleanName(nameRaw),
+      cleanName(
+        namePart
+      ),
 
     sex:
-      normalizeSex(sexRaw),
+      normalizeSex(
+        sexPart
+      ),
 
     breed:
-      cleanBreed(breedRaw)
+      cleanBreed(
+        breedPart
+      )
   };
 }
 
 function fixSexBreed(row) {
-  if (!row) return row;
+  if (!row) {
+    return row;
+  }
 
   if (row.sex) {
     row.breed =
@@ -694,105 +770,44 @@ function fixSexBreed(row) {
     return row;
   }
 
-  const gluedSexRe =
-    new RegExp(
-      `^(${SEX_WORDS})\\s*(.*)$`,
-      "i"
-    );
-
-  const m =
+  const match =
     breed.match(
-      gluedSexRe
+      new RegExp(
+        `^(${SEX_WORDS})\\s*(.*)$`,
+        "i"
+      )
     );
 
-  if (!m) {
+  if (!match) {
     return row;
   }
 
   row.sex =
-    normalizeSex(m[1]);
+    normalizeSex(
+      match[1]
+    );
 
   row.breed =
-    cleanBreed(m[2]);
+    cleanBreed(
+      match[2]
+    );
 
   return row;
 }
 
 // ============================================================
-// HEADER DEBUG
+// INDIVIDUAL ANIMALS
 // ============================================================
 
-function getHeaderDebug(
-  originalText
-) {
-  const text =
-    normalizeText(
-      originalText
-    );
-
-  const allLines =
-    text
-      .split(/\n/)
-      .map((s) =>
-        s
-          .replace(/\s+/g, " ")
-          .trim()
-      )
-      .filter(Boolean);
-
-  const headerPattern =
-    /Eil\.\s*Nr\.[\s\S]*?Gimimo\s*data/i;
-
-  const headerMatch =
-    text.match(
-      headerPattern
-    );
-
-  const startIdx =
-    headerMatch
-      ? text.indexOf(
-          headerMatch[0]
-        )
-      : -1;
-
-  const headerIdx =
-    allLines.findIndex(
-      (line) =>
-        /Eil\.\s*Nr\./i.test(
-          line
-        ) &&
-        /(Rūšis|Rusis)/i.test(
-          line
-        ) &&
-        /Gimimo\s*data/i.test(
-          line
-        )
-    );
-
-  return {
-    allLines,
-    headerIdx,
-    startIdx,
-
-    foundHeader:
-      startIdx !== -1 ||
-      headerIdx !== -1
-  };
-}
-
-function isValidTag(tag) {
-  if (!tag) {
+function isValidTag(value) {
+  if (!value) {
     return false;
   }
 
   return /^(?:[A-Z]{2,3}\d+|\d{8,20})$/i.test(
-    String(tag).trim()
+    String(value).trim()
   );
 }
-
-// ============================================================
-// INDIVIDUAL ANIMAL PARSER
-// ============================================================
 
 function parseIndividualAnimalsFromText(
   originalText
@@ -803,71 +818,94 @@ function parseIndividualAnimalsFromText(
     );
 
   const oneLine =
-    normalizeOneLine(text);
+    normalizeOneLine(
+      text
+    );
 
-  const {
-    allLines,
-    headerIdx,
-    startIdx,
-    foundHeader
-  } =
-    getHeaderDebug(text);
+  /*
+   * VERY IMPORTANT FIX:
+   *
+   * Old:
+   *
+   * [A-Z]{2}-\d+ OR \d{4,12}
+   *
+   * That meant row index 1000 could be
+   * treated as the previous animal's passport.
+   *
+   * New:
+   *
+   * passport requires letters + hyphen + number:
+   *
+   * AC-522862
+   * AF-473623
+   *
+   * Therefore row 1000 remains the next row.
+   */
 
-  const rowRe =
+  const rowRegex =
     new RegExp(
       [
+        // Row
         `(\\d{1,6})`,
+
+        // Species
         `\\s*(${SPECIES_WORDS})`,
+
+        // Tag number
         `\\s*((?:[A-Z]{2,3}\\d+|\\d{8,20}))`,
+
+        // Name + sex + breed
         `\\s*([\\s\\S]*?)`,
+
+        // Birth date
         `(\\d{4}[-./]\\d{2}[-./]\\d{2}|\\d{2}[-./]\\d{2}[-./]\\d{4})`,
+
+        // Age
         `\\s*(\\d+(?:[,.]\\d+)?)`,
-        `(?:\\s*((?:[A-Z]{2}-\\d+|\\d{4,12})))?`
+
+        // Optional passport
+        // IMPORTANT: NO digits-only alternative
+        `(?:\\s*([A-Z]{1,4}-\\d+))?`
       ].join(""),
       "gi"
     );
 
   const rows = [];
 
-  let m;
+  let match;
 
   while (
-    (m =
-      rowRe.exec(
-        oneLine
-      )) !== null
+    (
+      match =
+        rowRegex.exec(
+          oneLine
+        )
+    ) !== null
   ) {
     const rowIndex =
-      Number(m[1]);
-
-    const speciesRaw =
-      m[2];
-
-    const tag =
-      m[3];
-
-    const middle =
-      m[4];
-
-    const dateRaw =
-      m[5];
-
-    const ageRaw =
-      m[6];
-
-    const passportRaw =
-      m[7] || null;
-
-    const species =
-      normalizeLithuanianSpecies(
-        speciesRaw
+      Number(
+        match[1]
       );
 
-    const {
-      name,
-      sex,
-      breed
-    } =
+    const speciesRaw =
+      match[2];
+
+    const tag =
+      match[3];
+
+    const middle =
+      match[4];
+
+    const birthRaw =
+      match[5];
+
+    const ageRaw =
+      match[6];
+
+    const passport =
+      match[7] || null;
+
+    const parts =
       splitMiddleIntoNameSexBreed(
         middle
       );
@@ -876,7 +914,10 @@ function parseIndividualAnimalsFromText(
       row_index:
         rowIndex,
 
-      species,
+      species:
+        normalizeLithuanianSpecies(
+          speciesRaw
+        ),
 
       species_label:
         speciesRaw,
@@ -884,22 +925,26 @@ function parseIndividualAnimalsFromText(
       tag_no:
         tag,
 
-      name,
+      name:
+        parts.name,
 
-      sex,
+      sex:
+        parts.sex,
 
-      breed,
+      breed:
+        parts.breed,
 
       birth_date:
-        toISO(dateRaw),
+        toISO(
+          birthRaw
+        ),
 
       age_months:
         parseAge(
           ageRaw
         ),
 
-      passport:
-        passportRaw,
+      passport,
 
       row_type:
         "individual",
@@ -909,7 +954,9 @@ function parseIndividualAnimalsFromText(
     };
 
     row =
-      fixSexBreed(row);
+      fixSexBreed(
+        row
+      );
 
     if (
       row.row_index &&
@@ -919,59 +966,60 @@ function parseIndividualAnimalsFromText(
       ) &&
       row.birth_date
     ) {
-      rows.push(row);
+      rows.push(
+        row
+      );
     }
   }
+
+  // ==========================================================
+  // DEDUPLICATION
+  // ==========================================================
 
   const seen =
     new Set();
 
   const unique =
-    rows.filter(
-      (row) => {
-        const key =
-          `${row.species}:${row.tag_no}`;
+    [];
 
-        if (
-          seen.has(key)
-        ) {
-          return false;
-        }
+  for (const row of rows) {
+    const key =
+      `${row.species}:${row.tag_no}`;
 
-        seen.add(key);
+    if (
+      seen.has(key)
+    ) {
+      continue;
+    }
 
-        return true;
-      }
+    seen.add(
+      key
     );
+
+    unique.push(
+      row
+    );
+  }
 
   return {
     rows:
       unique,
 
     debug: {
-      headerIdx,
-
-      totalLines:
-        allLines.length,
-
-      startIdx,
-
-      foundHeader,
-
-      matched:
-        unique.length,
-
-      dateAnchoredMatches:
+      matched_before_dedupe:
         rows.length,
 
+      matched_after_dedupe:
+        unique.length,
+
       parser_mode:
-        "date_anchored_global"
+        "global_date_anchored_v2"
     }
   };
 }
 
 // ============================================================
-// GROUPED ANIMAL PARSER
+// GROUPED ANIMALS
 // ============================================================
 
 function parseGroupedAnimalsFromText(
@@ -987,12 +1035,18 @@ function parseGroupedAnimalsFromText(
   const lines =
     text
       .split(/\n/)
-      .map((s) =>
-        s
-          .replace(/\s+/g, " ")
-          .trim()
+      .map(
+        (line) =>
+          line
+            .replace(
+              /\s+/g,
+              " "
+            )
+            .trim()
       )
-      .filter(Boolean);
+      .filter(
+        Boolean
+      );
 
   let insideGroupedTable =
     false;
@@ -1046,37 +1100,30 @@ function parseGroupedAnimalsFromText(
       continue;
     }
 
-    const rowRe =
-      new RegExp(
-        `^(\\d{1,6})\\s+(${GROUPED_SPECIES_WORDS})\\s+(.+?)\\s+(\\d+(?:[,.]\\d+)?)\\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)$`,
-        "iu"
+    const match =
+      line.match(
+        new RegExp(
+          `^(\\d{1,6})\\s+(${GROUPED_SPECIES_WORDS})\\s+(.+?)\\s+(\\d+(?:[,.]\\d+)?)\\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)$`,
+          "iu"
+        )
       );
 
-    const m =
-      line.match(rowRe);
-
-    if (!m) {
+    if (!match) {
       continue;
     }
 
     const rowIndex =
-      Number(m[1]);
-
-    const speciesRaw =
-      m[2];
-
-    const groupName =
-      m[3].trim();
+      Number(
+        match[1]
+      );
 
     const count =
-      parseCount(m[4]);
-
-    const unit =
-      m[5].trim();
+      parseCount(
+        match[4]
+      );
 
     if (
       !rowIndex ||
-      !speciesRaw ||
       count === null
     ) {
       continue;
@@ -1088,19 +1135,20 @@ function parseGroupedAnimalsFromText(
 
       species:
         normalizeLithuanianSpecies(
-          speciesRaw
+          match[2]
         ),
 
       species_label:
-        speciesRaw,
+        match[2],
 
       group:
-        groupName,
+        match[3].trim(),
 
       animal_count:
         count,
 
-      unit,
+      unit:
+        match[5].trim(),
 
       row_type:
         "group",
@@ -1110,61 +1158,18 @@ function parseGroupedAnimalsFromText(
     });
   }
 
-  const summaryRe =
-    new RegExp(
-      `(${GROUPED_SPECIES_WORDS})\\s*\\((.*?)\\)\\s+(\\d+(?:[,.]\\d+)?)\\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)`,
-      "giu"
-    );
-
-  let sm;
-
-  let syntheticIndex =
-    100000;
-
-  while (
-    (sm =
-      summaryRe.exec(
-        text
-      )) !== null
-  ) {
-    groups.push({
-      row_index:
-        syntheticIndex++,
-
-      species:
-        normalizeLithuanianSpecies(
-          sm[1]
-        ),
-
-      species_label:
-        sm[1],
-
-      group:
-        sm[2].trim(),
-
-      animal_count:
-        parseCount(
-          sm[3]
-        ),
-
-      unit:
-        sm[4].trim(),
-
-      row_type:
-        "group",
-
-      source:
-        "vic_pdf_summary"
-    });
-  }
-
   const seen =
     new Set();
 
   return groups.filter(
     (row) => {
       const key =
-        `${row.species}:${row.group}:${row.animal_count}:${row.unit}`;
+        [
+          row.species,
+          row.group,
+          row.animal_count,
+          row.unit
+        ].join(":");
 
       if (
         seen.has(key)
@@ -1172,11 +1177,51 @@ function parseGroupedAnimalsFromText(
         return false;
       }
 
-      seen.add(key);
+      seen.add(
+        key
+      );
 
       return true;
     }
   );
+}
+
+// ============================================================
+// TOTAL COUNT FROM VIC FOOTER
+// ============================================================
+
+function parseReportedTotal(
+  originalText
+) {
+  const text =
+    normalizeText(
+      originalText
+    );
+
+  /*
+   * Example:
+   *
+   * Iš viso ataskaitoje:
+   * Galvijai Iš viso: 1892
+   */
+
+  const match =
+    text.match(
+      /Iš\s+viso\s+ataskaitoje[\s\S]{0,500}?Galvijai\s+Iš\s+viso:\s*(\d+)/iu
+    );
+
+  if (!match?.[1]) {
+    return null;
+  }
+
+  const number =
+    Number(
+      match[1]
+    );
+
+  return Number.isFinite(number)
+    ? number
+    : null;
 }
 
 // ============================================================
@@ -1199,13 +1244,18 @@ function parseAnimalsFromText(
       text
     );
 
-  const groupedRows =
+  const groupedResult =
     parseGroupedAnimalsFromText(
       text
     );
 
+  const reportedTotal =
+    parseReportedTotal(
+      text
+    );
+
   // ==========================================================
-  // ADD FARM / PERSONAL CODE TO EVERY INDIVIDUAL ANIMAL
+  // ADD CLIENT / FARM METADATA TO EVERY ANIMAL
   // ==========================================================
 
   const rows =
@@ -1233,12 +1283,8 @@ function parseAnimalsFromText(
       })
     );
 
-  // ==========================================================
-  // ADD SAME METADATA TO EVERY GROUPED ANIMAL ROW
-  // ==========================================================
-
-  const groupedRowsWithMetadata =
-    groupedRows.map(
+  const groupedRows =
+    groupedResult.map(
       (group) => ({
         ...group,
 
@@ -1278,30 +1324,14 @@ function parseAnimalsFromText(
       ) + 1;
   }
 
-  const groupedSpeciesCounts =
-    {};
-
-  for (
-    const row of
-    groupedRowsWithMetadata
-  ) {
-    groupedSpeciesCounts[
-      row.species
-    ] =
-      (
-        groupedSpeciesCounts[
-          row.species
-        ] || 0
-      ) + 1;
-  }
-
   return {
     metadata,
 
     rows,
 
-    groupedRows:
-      groupedRowsWithMetadata,
+    groupedRows,
+
+    reportedTotal,
 
     debug: {
       ...individualResult.debug,
@@ -1310,13 +1340,25 @@ function parseAnimalsFromText(
         rows.length,
 
       grouped_count:
-        groupedRowsWithMetadata.length,
+        groupedRows.length,
+
+      reported_total:
+        reportedTotal,
+
+      total_matches_report:
+        reportedTotal === null
+          ? null
+          : rows.length ===
+            reportedTotal,
+
+      missing_from_reported_total:
+        reportedTotal === null
+          ? null
+          : reportedTotal -
+            rows.length,
 
       species_counts:
         speciesCounts,
-
-      grouped_species_counts:
-        groupedSpeciesCounts,
 
       metadata_found: {
         holder_name:
@@ -1329,7 +1371,13 @@ function parseAnimalsFromText(
           !!metadata.holding_code,
 
         herd_code:
-          !!metadata.herd_code
+          !!metadata.herd_code,
+
+        holder_type:
+          !!metadata.holder_type,
+
+        declared_species:
+          !!metadata.declared_species
       },
 
       metadata_debug:
@@ -1339,7 +1387,7 @@ function parseAnimalsFromText(
 }
 
 // ============================================================
-// REQUEST BODY HELPERS
+// REQUEST HELPERS
 // ============================================================
 
 async function readRawRequest(
@@ -1395,7 +1443,8 @@ async function readJsonRequest(
       req.on(
         "data",
         (chunk) => {
-          data += chunk;
+          data +=
+            chunk;
         }
       );
 
@@ -1427,7 +1476,8 @@ async function readJsonRequest(
 }
 
 // ============================================================
-// HANDLER
+// API HANDLER
+//
 // EXACTLY ONE PDF PER REQUEST
 // ============================================================
 
@@ -1442,6 +1492,8 @@ module.exports =
       return res
         .status(405)
         .json({
+          ok: false,
+
           error:
             "Use POST"
         });
@@ -1455,6 +1507,16 @@ module.exports =
           ] || ""
         ).toLowerCase();
 
+      let pdfBuffer =
+        null;
+
+      let inputMode =
+        null;
+
+      // ======================================================
+      // DO NOT ALLOW MULTIPART / MULTIPLE FILES
+      // ======================================================
+
       if (
         contentType.includes(
           "multipart/form-data"
@@ -1463,19 +1525,15 @@ module.exports =
         return res
           .status(400)
           .json({
+            ok: false,
+
             error:
               "Send exactly one PDF per request as raw binary data. Multipart upload is not supported."
           });
       }
 
-      let pdfBuffer =
-        null;
-
-      let inputMode =
-        null;
-
       // ======================================================
-      // ONE RAW PDF
+      // RAW PDF
       // ======================================================
 
       if (
@@ -1496,7 +1554,7 @@ module.exports =
       }
 
       // ======================================================
-      // ONE PDF URL
+      // ONE URL
       // ======================================================
 
       else if (
@@ -1520,6 +1578,8 @@ module.exports =
           return res
             .status(400)
             .json({
+              ok: false,
+
               error:
                 "Only one PDF is allowed per request."
             });
@@ -1534,59 +1594,59 @@ module.exports =
           return res
             .status(400)
             .json({
+              ok: false,
+
               error:
                 'Send exactly one PDF URL: { "url": "https://..." }'
             });
         }
 
-        const pdfUrl =
-          body.url.trim();
-
-        const remoteResponse =
+        const response =
           await fetch(
-            pdfUrl
+            body.url.trim()
           );
 
         if (
-          !remoteResponse.ok
+          !response.ok
         ) {
           return res
             .status(400)
             .json({
+              ok: false,
+
               error:
-                "Cannot fetch PDF URL",
+                "Could not fetch PDF URL",
 
               status:
-                remoteResponse.status
+                response.status
             });
         }
 
         pdfBuffer =
           Buffer.from(
-            await remoteResponse.arrayBuffer()
+            await response.arrayBuffer()
           );
 
         inputMode =
           "url";
       }
 
-      // ======================================================
-      // UNSUPPORTED CONTENT TYPE
-      // ======================================================
-
       else {
         return res
           .status(400)
           .json({
+            ok: false,
+
             error:
               "Unsupported content-type. Send one PDF as application/pdf or application/octet-stream.",
 
-            contentType
+            content_type:
+              contentType
           });
       }
 
       // ======================================================
-      // VALIDATE FILE
+      // VALIDATE PDF
       // ======================================================
 
       if (
@@ -1596,6 +1656,8 @@ module.exports =
         return res
           .status(400)
           .json({
+            ok: false,
+
             error:
               "PDF file is empty."
           });
@@ -1603,24 +1665,30 @@ module.exports =
 
       const signature =
         pdfBuffer
-          .subarray(0, 5)
+          .subarray(
+            0,
+            5
+          )
           .toString(
             "ascii"
           );
 
       if (
-        signature !== "%PDF-"
+        signature !==
+        "%PDF-"
       ) {
         return res
           .status(400)
           .json({
+            ok: false,
+
             error:
-              "Input is not a valid PDF file."
+              "Input is not a valid PDF."
           });
       }
 
       // ======================================================
-      // PARSE PDF
+      // PDF PARSE
       // ======================================================
 
       const parsed =
@@ -1637,20 +1705,25 @@ module.exports =
         return res
           .status(422)
           .json({
+            ok: false,
+
             error:
               "PDF contains no extractable text."
           });
       }
 
+      const result =
+        parseAnimalsFromText(
+          extractedText
+        );
+
       const {
         metadata,
         rows,
         groupedRows,
+        reportedTotal,
         debug
-      } =
-        parseAnimalsFromText(
-          extractedText
-        );
+      } = result;
 
       // ======================================================
       // RESPONSE
@@ -1668,6 +1741,10 @@ module.exports =
 
           input_mode:
             inputMode,
+
+          // ------------------------------------------
+          // Farm / client identity
+          // ------------------------------------------
 
           client_personal_code:
             metadata
@@ -1715,11 +1792,28 @@ module.exports =
 
           metadata,
 
+          // ------------------------------------------
+          // Individual animals
+          // ------------------------------------------
+
           count:
             rows.length,
 
+          reported_count:
+            reportedTotal,
+
+          count_matches_report:
+            reportedTotal === null
+              ? null
+              : rows.length ===
+                reportedTotal,
+
           animals:
             rows,
+
+          // ------------------------------------------
+          // Groups
+          // ------------------------------------------
 
           grouped_count:
             groupedRows.length,
@@ -1748,7 +1842,7 @@ module.exports =
   };
 
 // ============================================================
-// VERCEL CONFIG
+// VERCEL
 // ============================================================
 
 module.exports.config = {
