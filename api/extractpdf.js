@@ -96,13 +96,11 @@ function normalizeSex(s) {
     .trim()
     .toLowerCase();
 
-  // Cattle
   if (x.startsWith("buliuk")) return "Buliukas";
   if (x.startsWith("buliu")) return "Bulius";
   if (x.startsWith("karv")) return "Karvė";
   if (x.startsWith("tely")) return "Telyčaitė";
 
-  // Horses
   if (
     x.startsWith("eržil") ||
     x.startsWith("erzil")
@@ -113,7 +111,6 @@ function normalizeSex(s) {
   if (x.startsWith("kumel")) return "Kumelė";
   if (x.startsWith("kastr")) return "Kastratas";
 
-  // Other animals
   if (x.startsWith("avinas")) return "Avinas";
   if (x.startsWith("avis")) return "Avis";
 
@@ -169,10 +166,7 @@ function parseAge(raw) {
   );
 
   if (!Number.isFinite(n)) return null;
-
-  if (n < 0 || n > 400) {
-    return null;
-  }
+  if (n < 0 || n > 400) return null;
 
   return n;
 }
@@ -205,9 +199,6 @@ function parseDocumentMetadata(originalText) {
   const normalized =
     normalizeText(originalText || "");
 
-  // Only parse the first holder/header section.
-  // Stop before the animal table so we don't accidentally
-  // capture values from later pages.
   const tableStartMatch =
     normalized.match(/Eil\.\s*Nr\./i);
 
@@ -236,30 +227,15 @@ function parseDocumentMetadata(originalText) {
 
   const metadata = {
     holder_name: null,
-
-    // Asmens / įmonės kodas
     client_personal_code: null,
-
-    // VIC "Valda"
     holding_code: null,
-
-    // VIC "Banda"
     herd_code: null,
-
     holder_type: null,
-
     declared_species: null,
-
     holder_address: null,
-
     herd_address: null,
-
     registration_date: null
   };
-
-  // ----------------------------------------------------------
-  // helper: regex list
-  // ----------------------------------------------------------
 
   function firstMatch(
     patterns,
@@ -313,8 +289,6 @@ function parseDocumentMetadata(originalText) {
           }
         }
 
-        // In some VIC PDFs pdf-parse may place
-        // the value on the next line.
         if (lines[i + 1]) {
           return cleanValue(
             lines[i + 1]
@@ -426,9 +400,9 @@ function parseDocumentMetadata(originalText) {
   // ==========================================================
 
   metadata.holder_name = firstMatch([
-    /(?:^|\s)\d+\.\s*Laikytojas\s+(.+?)(?=\s+(?:Valda|Banda|Asmens\s*\/|Tipas|Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu,
+    /(?:^|\s)\d+\.\s*Laikytojas\s+(.+?)(?=\s*(?:Valda|Banda|Asmens\s*\/|Tipas|Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu,
 
-    /(?:^|\s)Laikytojas\s+(.+?)(?=\s+(?:Valda|Banda|Asmens\s*\/|Tipas|Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu
+    /(?:^|\s)Laikytojas\s+(.+?)(?=\s*(?:Valda|Banda|Asmens\s*\/|Tipas|Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu
   ]);
 
   if (!metadata.holder_name) {
@@ -441,15 +415,15 @@ function parseDocumentMetadata(originalText) {
       metadata.holder_name =
         holderLine
           .replace(
-            /\s+Valda\b.*$/iu,
+            /Valda\s*\d+.*$/iu,
             ""
           )
           .replace(
-            /\s+Banda\b.*$/iu,
+            /Banda\s*\d+.*$/iu,
             ""
           )
           .replace(
-            /\s+Asmens\s*\/.*$/iu,
+            /Asmens\s*\/.*$/iu,
             ""
           )
           .trim() || null;
@@ -491,7 +465,6 @@ function parseDocumentMetadata(originalText) {
 
   const speciesRaw = firstMatch([
     /\bRūšis\s*[:\-]?\s*([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)/iu,
-
     /\bRusis\s*[:\-]?\s*([A-Za-z]+)/iu
   ]);
 
@@ -528,7 +501,6 @@ function parseDocumentMetadata(originalText) {
     firstMatch(
       [
         /Įregistravimo\s+data[\s\S]{0,120}?(\d{4}[-./]\d{2}[-./]\d{2})/iu,
-
         /Iregistravimo\s+data[\s\S]{0,120}?(\d{4}[-./]\d{2}[-./]\d{2})/iu
       ],
       headerText
@@ -589,30 +561,12 @@ function cleanBreed(s) {
 
   const cleaned = String(s)
     .replace(/\s+/g, " ")
-    .replace(
-      /\bwww\.zudc\.lt\b/gi,
-      ""
-    )
-    .replace(
-      /\bGyvų gyvūnų sąrašas\b/gi,
-      ""
-    )
-    .replace(
-      /\bSugrupuota statistika\b/gi,
-      ""
-    )
-    .replace(
-      /\bIš viso ataskaitoje\b/gi,
-      ""
-    )
-    .replace(
-      /\bIš viso registruota grupėmis\b/gi,
-      ""
-    )
-    .replace(
-      /\bDeklaruota gyvūnų\b/gi,
-      ""
-    )
+    .replace(/\bwww\.zudc\.lt\b/gi, "")
+    .replace(/\bGyvų gyvūnų sąrašas\b/gi, "")
+    .replace(/\bSugrupuota statistika\b/gi, "")
+    .replace(/\bIš viso ataskaitoje\b/gi, "")
+    .replace(/\bIš viso registruota grupėmis\b/gi, "")
+    .replace(/\bDeklaruota gyvūnų\b/gi, "")
     .replace(
       new RegExp(
         `^(${SEX_WORDS})\\s*`,
@@ -859,33 +813,15 @@ function parseIndividualAnimalsFromText(
   } =
     getHeaderDebug(text);
 
-  /*
-    Finds:
-
-    row index
-    species
-    tag
-    name / sex / breed
-    birth date
-    age
-    optional passport
-  */
-
   const rowRe =
     new RegExp(
       [
         `(\\d{1,6})`,
-
         `\\s*(${SPECIES_WORDS})`,
-
         `\\s*((?:[A-Z]{2,3}\\d+|\\d{8,20}))`,
-
         `\\s*([\\s\\S]*?)`,
-
         `(\\d{4}[-./]\\d{2}[-./]\\d{2}|\\d{2}[-./]\\d{2}[-./]\\d{4})`,
-
         `\\s*(\\d+(?:[,.]\\d+)?)`,
-
         `(?:\\s*((?:[A-Z]{2}-\\d+|\\d{4,12})))?`
       ].join(""),
       "gi"
@@ -987,7 +923,6 @@ function parseIndividualAnimalsFromText(
     }
   }
 
-  // Remove duplicates
   const seen =
     new Set();
 
@@ -1175,9 +1110,6 @@ function parseGroupedAnimalsFromText(
     });
   }
 
-  // Example:
-  // Vištos (Iš viso) 9 vnt.
-
   const summaryRe =
     new RegExp(
       `(${GROUPED_SPECIES_WORDS})\\s*\\((.*?)\\)\\s+(\\d+(?:[,.]\\d+)?)\\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž.]+)`,
@@ -1272,12 +1204,69 @@ function parseAnimalsFromText(
       text
     );
 
+  // ==========================================================
+  // ADD FARM / PERSONAL CODE TO EVERY INDIVIDUAL ANIMAL
+  // ==========================================================
+
+  const rows =
+    individualResult.rows.map(
+      (animal) => ({
+        ...animal,
+
+        client_personal_code:
+          metadata.client_personal_code,
+
+        personal_code:
+          metadata.client_personal_code,
+
+        holding_code:
+          metadata.holding_code,
+
+        vic_farm_code:
+          metadata.holding_code,
+
+        herd_code:
+          metadata.herd_code,
+
+        holder_name:
+          metadata.holder_name
+      })
+    );
+
+  // ==========================================================
+  // ADD SAME METADATA TO EVERY GROUPED ANIMAL ROW
+  // ==========================================================
+
+  const groupedRowsWithMetadata =
+    groupedRows.map(
+      (group) => ({
+        ...group,
+
+        client_personal_code:
+          metadata.client_personal_code,
+
+        personal_code:
+          metadata.client_personal_code,
+
+        holding_code:
+          metadata.holding_code,
+
+        vic_farm_code:
+          metadata.holding_code,
+
+        herd_code:
+          metadata.herd_code,
+
+        holder_name:
+          metadata.holder_name
+      })
+    );
+
   const speciesCounts =
     {};
 
   for (
-    const row of
-    individualResult.rows
+    const row of rows
   ) {
     speciesCounts[
       row.species
@@ -1294,7 +1283,7 @@ function parseAnimalsFromText(
 
   for (
     const row of
-    groupedRows
+    groupedRowsWithMetadata
   ) {
     groupedSpeciesCounts[
       row.species
@@ -1309,21 +1298,19 @@ function parseAnimalsFromText(
   return {
     metadata,
 
-    rows:
-      individualResult.rows,
+    rows,
 
-    groupedRows,
+    groupedRows:
+      groupedRowsWithMetadata,
 
     debug: {
       ...individualResult.debug,
 
       individual_count:
-        individualResult
-          .rows
-          .length,
+        rows.length,
 
       grouped_count:
-        groupedRows.length,
+        groupedRowsWithMetadata.length,
 
       species_counts:
         speciesCounts,
@@ -1333,20 +1320,16 @@ function parseAnimalsFromText(
 
       metadata_found: {
         holder_name:
-          !!metadata
-            .holder_name,
+          !!metadata.holder_name,
 
         client_personal_code:
-          !!metadata
-            .client_personal_code,
+          !!metadata.client_personal_code,
 
         holding_code:
-          !!metadata
-            .holding_code,
+          !!metadata.holding_code,
 
         herd_code:
-          !!metadata
-            .herd_code
+          !!metadata.herd_code
       },
 
       metadata_debug:
@@ -1472,8 +1455,6 @@ module.exports =
           ] || ""
         ).toLowerCase();
 
-      // We deliberately do not accept multipart.
-      // n8n should send ONE binary PDF directly.
       if (
         contentType.includes(
           "multipart/form-data"
@@ -1528,7 +1509,6 @@ module.exports =
             req
           );
 
-        // Explicitly block arrays / multiple files
         if (
           Array.isArray(body) ||
           Array.isArray(
@@ -1621,7 +1601,6 @@ module.exports =
           });
       }
 
-      // Simple PDF signature check
       const signature =
         pdfBuffer
           .subarray(0, 5)
@@ -1690,7 +1669,6 @@ module.exports =
           input_mode:
             inputMode,
 
-          // IMPORTANT identifiers for n8n farm matching
           client_personal_code:
             metadata
               .client_personal_code,
@@ -1735,17 +1713,14 @@ module.exports =
             metadata
               .registration_date,
 
-          // Complete metadata object
           metadata,
 
-          // Animals
           count:
             rows.length,
 
           animals:
             rows,
 
-          // Grouped animals
           grouped_count:
             groupedRows.length,
 
