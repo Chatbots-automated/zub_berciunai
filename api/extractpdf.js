@@ -96,13 +96,13 @@ function normalizeSex(s) {
     .trim()
     .toLowerCase();
 
-  // Galvijai
+  // Cattle
   if (x.startsWith("buliuk")) return "Buliukas";
   if (x.startsWith("buliu")) return "Bulius";
   if (x.startsWith("karv")) return "Karvė";
   if (x.startsWith("tely")) return "Telyčaitė";
 
-  // Arkliai
+  // Horses
   if (
     x.startsWith("eržil") ||
     x.startsWith("erzil")
@@ -113,7 +113,7 @@ function normalizeSex(s) {
   if (x.startsWith("kumel")) return "Kumelė";
   if (x.startsWith("kastr")) return "Kastratas";
 
-  // Others
+  // Other animals
   if (x.startsWith("avinas")) return "Avinas";
   if (x.startsWith("avis")) return "Avis";
 
@@ -202,14 +202,42 @@ function parseCount(raw) {
 // ============================================================
 
 function parseDocumentMetadata(originalText) {
-  const text = normalizeText(originalText || "");
-  const oneLine = normalizeOneLine(text);
+  const normalized =
+    normalizeText(originalText || "");
+
+  // Only parse the first holder/header section.
+  // Stop before the animal table so we don't accidentally
+  // capture values from later pages.
+  const tableStartMatch =
+    normalized.match(/Eil\.\s*Nr\./i);
+
+  const headerText =
+    tableStartMatch &&
+    tableStartMatch.index !== undefined
+      ? normalized.slice(
+          0,
+          tableStartMatch.index
+        )
+      : normalized.slice(0, 8000);
+
+  const headerOneLine = headerText
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const lines = headerText
+    .split(/\n+/)
+    .map((line) =>
+      line
+        .replace(/\s+/g, " ")
+        .trim()
+    )
+    .filter(Boolean);
 
   const metadata = {
     holder_name: null,
 
-    // IMPORTANT:
-    // this is the Asmens/įmonės kodas
+    // Asmens / įmonės kodas
     client_personal_code: null,
 
     // VIC "Valda"
@@ -219,168 +247,309 @@ function parseDocumentMetadata(originalText) {
     herd_code: null,
 
     holder_type: null,
+
     declared_species: null,
 
     holder_address: null,
+
     herd_address: null,
 
     registration_date: null
   };
 
   // ----------------------------------------------------------
-  // Main header:
-  //
-  // 1. Laikytojas IEVA SKUČIENĖ
-  // Valda 1011843413
-  // Banda 11315300527
+  // helper: regex list
   // ----------------------------------------------------------
 
-  const mainHeaderMatch = oneLine.match(
-    /(?:\d+\.\s*)?Laikytojas\s+(.+?)\s+Valda\s+(\d+)\s+Banda\s+(\d+)/i
-  );
+  function firstMatch(
+    patterns,
+    text = headerOneLine
+  ) {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
 
-  if (mainHeaderMatch) {
-    metadata.holder_name =
-      cleanValue(mainHeaderMatch[1]);
+      if (
+        match &&
+        match[1] !== undefined &&
+        match[1] !== null
+      ) {
+        const cleaned =
+          cleanValue(match[1]);
 
-    metadata.holding_code =
-      normalizeCompact(mainHeaderMatch[2]);
+        if (cleaned) {
+          return cleaned;
+        }
+      }
+    }
 
-    metadata.herd_code =
-      normalizeCompact(mainHeaderMatch[3]);
+    return null;
   }
 
-  // ----------------------------------------------------------
-  // Personal/company code
-  //
-  // Asmens/įmonės kodas 49203291027
-  // ----------------------------------------------------------
+  function digitsOnly(value) {
+    if (!value) return null;
 
-  const personalCodeMatch = oneLine.match(
-    /Asmens\s*\/?\s*įmonės\s+kodas\s+(\d{8,13})/i
-  );
+    const digits = String(value)
+      .replace(/\D/g, "")
+      .trim();
 
-  if (personalCodeMatch) {
-    metadata.client_personal_code =
-      normalizeCompact(personalCodeMatch[1]);
+    return digits || null;
   }
 
-  // Support versions without Lithuanian letters
-  if (!metadata.client_personal_code) {
-    const fallbackCodeMatch = oneLine.match(
-      /Asmens\s*\/?\s*imones\s+kodas\s+(\d{8,13})/i
-    );
+  function findLineValue(patterns) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
 
-    if (fallbackCodeMatch) {
-      metadata.client_personal_code =
-        normalizeCompact(fallbackCodeMatch[1]);
+      for (const pattern of patterns) {
+        const match = line.match(pattern);
+
+        if (!match) continue;
+
+        if (match[1]) {
+          const value =
+            cleanValue(match[1]);
+
+          if (value) {
+            return value;
+          }
+        }
+
+        // In some VIC PDFs pdf-parse may place
+        // the value on the next line.
+        if (lines[i + 1]) {
+          return cleanValue(
+            lines[i + 1]
+          );
+        }
+      }
+    }
+
+    return null;
+  }
+
+  // ==========================================================
+  // PERSONAL / COMPANY CODE
+  // ==========================================================
+
+  let personalCode = firstMatch([
+    /Asmens\s*\/\s*įmonės\s*kodas\s*[:\-]?\s*(\d{8,13})/iu,
+    /Asmens\s*\/\s*imones\s*kodas\s*[:\-]?\s*(\d{8,13})/iu,
+    /Asmens\s*\/?\s*įmonės\s*kodas[\s:;\-]*(\d{8,13})/iu,
+    /Asmens\s*\/?\s*imones\s*kodas[\s:;\-]*(\d{8,13})/iu
+  ]);
+
+  if (!personalCode) {
+    const lineValue = findLineValue([
+      /Asmens\s*\/\s*įmonės\s*kodas\s*[:\-]?\s*(.*)$/iu,
+      /Asmens\s*\/\s*imones\s*kodas\s*[:\-]?\s*(.*)$/iu
+    ]);
+
+    if (lineValue) {
+      const codeMatch =
+        lineValue.match(
+          /\b\d{8,13}\b/
+        );
+
+      if (codeMatch) {
+        personalCode =
+          codeMatch[0];
+      }
     }
   }
 
-  // ----------------------------------------------------------
-  // Holder type
-  //
-  // Tipas Valdytojas
-  // ----------------------------------------------------------
+  metadata.client_personal_code =
+    digitsOnly(personalCode);
 
-  const holderTypeMatch = oneLine.match(
-    /Tipas\s+(.+?)\s+Rūšis\b/i
-  );
+  // ==========================================================
+  // VALDA
+  // ==========================================================
 
-  if (holderTypeMatch) {
-    metadata.holder_type =
-      cleanValue(holderTypeMatch[1]);
+  let holdingCode = firstMatch([
+    /\bValda\s*[:\-]?\s*(\d{6,15})\b/iu,
+    /\bValdos\s+kodas\s*[:\-]?\s*(\d{6,15})\b/iu
+  ]);
+
+  if (!holdingCode) {
+    const lineValue = findLineValue([
+      /\bValda\s*[:\-]?\s*(.*)$/iu,
+      /\bValdos\s+kodas\s*[:\-]?\s*(.*)$/iu
+    ]);
+
+    if (lineValue) {
+      const codeMatch =
+        lineValue.match(
+          /\b\d{6,15}\b/
+        );
+
+      if (codeMatch) {
+        holdingCode =
+          codeMatch[0];
+      }
+    }
   }
 
-  // ASCII fallback
+  metadata.holding_code =
+    digitsOnly(holdingCode);
+
+  // ==========================================================
+  // BANDA
+  // ==========================================================
+
+  let herdCode = firstMatch([
+    /\bBanda\s*[:\-]?\s*(\d{6,15})\b/iu,
+    /\bBandos\s+kodas\s*[:\-]?\s*(\d{6,15})\b/iu
+  ]);
+
+  if (!herdCode) {
+    const lineValue = findLineValue([
+      /\bBanda\s*[:\-]?\s*(.*)$/iu,
+      /\bBandos\s+kodas\s*[:\-]?\s*(.*)$/iu
+    ]);
+
+    if (lineValue) {
+      const codeMatch =
+        lineValue.match(
+          /\b\d{6,15}\b/
+        );
+
+      if (codeMatch) {
+        herdCode =
+          codeMatch[0];
+      }
+    }
+  }
+
+  metadata.herd_code =
+    digitsOnly(herdCode);
+
+  // ==========================================================
+  // HOLDER NAME
+  // ==========================================================
+
+  metadata.holder_name = firstMatch([
+    /(?:^|\s)\d+\.\s*Laikytojas\s+(.+?)(?=\s+(?:Valda|Banda|Asmens\s*\/|Tipas|Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu,
+
+    /(?:^|\s)Laikytojas\s+(.+?)(?=\s+(?:Valda|Banda|Asmens\s*\/|Tipas|Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu
+  ]);
+
+  if (!metadata.holder_name) {
+    const holderLine =
+      findLineValue([
+        /(?:\d+\.\s*)?Laikytojas\s*[:\-]?\s*(.*)$/iu
+      ]);
+
+    if (holderLine) {
+      metadata.holder_name =
+        holderLine
+          .replace(
+            /\s+Valda\b.*$/iu,
+            ""
+          )
+          .replace(
+            /\s+Banda\b.*$/iu,
+            ""
+          )
+          .replace(
+            /\s+Asmens\s*\/.*$/iu,
+            ""
+          )
+          .trim() || null;
+    }
+  }
+
+  // ==========================================================
+  // HOLDER TYPE
+  // ==========================================================
+
+  metadata.holder_type = firstMatch([
+    /\bTipas\s*[:\-]?\s*(.+?)(?=\s+(?:Rūšis|Rusis|Laikytojo\s+adresas|Įregistravimo|Iregistravimo|Eil\.))/iu
+  ]);
+
   if (!metadata.holder_type) {
-    const holderTypeFallback = oneLine.match(
-      /Tipas\s+(.+?)\s+Rusis\b/i
-    );
+    const typeLine =
+      findLineValue([
+        /\bTipas\s*[:\-]?\s*(.*)$/iu
+      ]);
 
-    if (holderTypeFallback) {
+    if (typeLine) {
       metadata.holder_type =
-        cleanValue(holderTypeFallback[1]);
+        typeLine
+          .replace(
+            /\s+Rūšis\b.*$/iu,
+            ""
+          )
+          .replace(
+            /\s+Rusis\b.*$/iu,
+            ""
+          )
+          .trim() || null;
     }
   }
 
-  // ----------------------------------------------------------
-  // Declared species
-  //
-  // Rūšis Galvijai
-  // ----------------------------------------------------------
+  // ==========================================================
+  // DECLARED SPECIES
+  // ==========================================================
 
-  const speciesMatch = oneLine.match(
-    /Rūšis\s+([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)(?=\s+Laikytojo\s+adresas|\s+Įregistravimo|\s+Iregistravimo|\s+Eil\.|\s*$)/i
-  );
+  const speciesRaw = firstMatch([
+    /\bRūšis\s*[:\-]?\s*([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž]+)/iu,
 
-  if (speciesMatch) {
+    /\bRusis\s*[:\-]?\s*([A-Za-z]+)/iu
+  ]);
+
+  if (speciesRaw) {
     metadata.declared_species =
       normalizeLithuanianSpecies(
-        speciesMatch[1]
+        speciesRaw
       );
   }
 
-  // ASCII fallback
-  if (!metadata.declared_species) {
-    const speciesFallback = oneLine.match(
-      /Rusis\s+([A-Za-z]+)(?=\s+Laikytojo\s+adresas|\s+Iregistravimo|\s+Eil\.|\s*$)/i
+  // ==========================================================
+  // HOLDER ADDRESS
+  // ==========================================================
+
+  metadata.holder_address =
+    firstMatch([
+      /Laikytojo\s+adresas\s*[:\-]?\s*(.+?)(?=\s+(?:Įregistravimo|Iregistravimo|Bandos\s+adresas|Eil\.\s*Nr\.))/iu
+    ]);
+
+  // ==========================================================
+  // HERD ADDRESS
+  // ==========================================================
+
+  metadata.herd_address =
+    firstMatch([
+      /Bandos\s+adresas\s*[:\-]?\s*(.+?)(?=\s+(?:Eil\.\s*Nr\.|www\.zudc\.lt|Gyvų\s+gyvūnų\s+sąrašas|Sugrupuota|$))/iu
+    ]);
+
+  // ==========================================================
+  // REGISTRATION DATE
+  // ==========================================================
+
+  const registrationRaw =
+    firstMatch(
+      [
+        /Įregistravimo\s+data[\s\S]{0,120}?(\d{4}[-./]\d{2}[-./]\d{2})/iu,
+
+        /Iregistravimo\s+data[\s\S]{0,120}?(\d{4}[-./]\d{2}[-./]\d{2})/iu
+      ],
+      headerText
     );
 
-    if (speciesFallback) {
-      metadata.declared_species =
-        normalizeLithuanianSpecies(
-          speciesFallback[1]
-        );
-    }
-  }
-
-  // ----------------------------------------------------------
-  // Holder address
-  //
-  // Laikytojo adresas ...
-  // ----------------------------------------------------------
-
-  const holderAddressMatch = oneLine.match(
-    /Laikytojo\s+adresas\s+(.+?)(?=\s+Įregistravimo\s+data|\s+Iregistravimo\s+data|\s+Bandos\s+adresas|\s+Eil\.\s*Nr\.)/i
-  );
-
-  if (holderAddressMatch) {
-    metadata.holder_address =
-      cleanValue(holderAddressMatch[1]);
-  }
-
-  // ----------------------------------------------------------
-  // Registration date
-  //
-  // Įregistravimo data
-  // išregistravimo data
-  // 2010-04-16
-  // ----------------------------------------------------------
-
-  const registrationDateMatch = oneLine.match(
-    /(?:Įregistravimo|Iregistravimo)\s+data(?:\s+išregistravimo\s+data|\s+isregistravimo\s+data)?\s+(\d{4}-\d{2}-\d{2})/i
-  );
-
-  if (registrationDateMatch) {
+  if (registrationRaw) {
     metadata.registration_date =
-      toISO(registrationDateMatch[1]);
+      toISO(registrationRaw);
   }
 
-  // ----------------------------------------------------------
-  // Herd address
-  // ----------------------------------------------------------
+  return {
+    metadata,
 
-  const herdAddressMatch = oneLine.match(
-    /Bandos\s+adresas\s+(.+?)(?=\s+Eil\.\s*Nr\.|\s+www\.zudc\.lt|\s+Gyvų\s+gyvūnų\s+sąrašas|$)/i
-  );
+    debug: {
+      header_lines:
+        lines.slice(0, 40),
 
-  if (herdAddressMatch) {
-    metadata.herd_address =
-      cleanValue(herdAddressMatch[1]);
-  }
-
-  return metadata;
+      header_text:
+        headerOneLine.slice(0, 3000)
+    }
+  };
 }
 
 // ============================================================
@@ -395,6 +564,10 @@ const GROUPED_SPECIES_WORDS =
 
 const SEX_WORDS =
   "Telyčaitė|Telycaite|Telytė|Telyte|Telyčia|Telycia|Buliukas|Bulius|Karvė|Karve|Eržilas|Erzilas|Kumelė|Kumele|Kastratas|Avis|Avinas|Ėriukas|Eriukas|Ožka|Ozka|Ožys|Ozys|Paršavedė|Parsavede|Kuilys";
+
+// ============================================================
+// BREED / NAME HELPERS
+// ============================================================
 
 function normalizeBreedSpacing(s) {
   if (!s) return null;
@@ -416,12 +589,30 @@ function cleanBreed(s) {
 
   const cleaned = String(s)
     .replace(/\s+/g, " ")
-    .replace(/\bwww\.zudc\.lt\b/gi, "")
-    .replace(/\bGyvų gyvūnų sąrašas\b/gi, "")
-    .replace(/\bSugrupuota statistika\b/gi, "")
-    .replace(/\bIš viso ataskaitoje\b/gi, "")
-    .replace(/\bIš viso registruota grupėmis\b/gi, "")
-    .replace(/\bDeklaruota gyvūnų\b/gi, "")
+    .replace(
+      /\bwww\.zudc\.lt\b/gi,
+      ""
+    )
+    .replace(
+      /\bGyvų gyvūnų sąrašas\b/gi,
+      ""
+    )
+    .replace(
+      /\bSugrupuota statistika\b/gi,
+      ""
+    )
+    .replace(
+      /\bIš viso ataskaitoje\b/gi,
+      ""
+    )
+    .replace(
+      /\bIš viso registruota grupėmis\b/gi,
+      ""
+    )
+    .replace(
+      /\bDeklaruota gyvūnų\b/gi,
+      ""
+    )
     .replace(
       new RegExp(
         `^(${SEX_WORDS})\\s*`,
@@ -444,10 +635,13 @@ function cleanName(s) {
   if (!name) return null;
 
   const onlyUpperNameChars =
-    /^[A-ZĄČĘĖĮŠŲŪŽ\s.'-]+$/u.test(name);
+    /^[A-ZĄČĘĖĮŠŲŪŽ\s.'-]+$/u.test(
+      name
+    );
 
   if (onlyUpperNameChars) {
-    name = name.replace(/\s+/g, "");
+    name =
+      name.replace(/\s+/g, "");
   }
 
   return name || null;
@@ -459,15 +653,18 @@ function findSexMatch(s) {
   const normalized =
     normalizeBreedSpacing(s);
 
-  const re = new RegExp(
-    `(${SEX_WORDS})`,
-    "i"
-  );
+  const re =
+    new RegExp(
+      `(${SEX_WORDS})`,
+      "i"
+    );
 
   return normalized.match(re);
 }
 
-function splitMiddleIntoNameSexBreed(middle) {
+function splitMiddleIntoNameSexBreed(
+  middle
+) {
   const cleanMiddle =
     normalizeBreedSpacing(
       normalizeOneLine(middle)
@@ -478,30 +675,43 @@ function splitMiddleIntoNameSexBreed(middle) {
 
   if (!sexMatch) {
     return {
-      name: cleanName(cleanMiddle),
+      name:
+        cleanName(cleanMiddle),
+
       sex: null,
+
       breed: null
     };
   }
 
-  const nameRaw = cleanMiddle
-    .slice(0, sexMatch.index)
-    .trim();
+  const nameRaw =
+    cleanMiddle
+      .slice(
+        0,
+        sexMatch.index
+      )
+      .trim();
 
   const sexRaw =
     sexMatch[0];
 
-  const breedRaw = cleanMiddle
-    .slice(
-      sexMatch.index +
-      sexRaw.length
-    )
-    .trim();
+  const breedRaw =
+    cleanMiddle
+      .slice(
+        sexMatch.index +
+          sexRaw.length
+      )
+      .trim();
 
   return {
-    name: cleanName(nameRaw),
-    sex: normalizeSex(sexRaw),
-    breed: cleanBreed(breedRaw)
+    name:
+      cleanName(nameRaw),
+
+    sex:
+      normalizeSex(sexRaw),
+
+    breed:
+      cleanBreed(breedRaw)
   };
 }
 
@@ -511,15 +721,20 @@ function fixSexBreed(row) {
   if (row.sex) {
     row.breed =
       cleanBreed(
-        normalizeBreedSpacing(row.breed)
+        normalizeBreedSpacing(
+          row.breed
+        )
       );
 
     return row;
   }
 
-  const breed = row.breed
-    ? normalizeBreedSpacing(row.breed)
-    : "";
+  const breed =
+    row.breed
+      ? normalizeBreedSpacing(
+          row.breed
+        )
+      : "";
 
   if (!breed) {
     return row;
@@ -532,7 +747,9 @@ function fixSexBreed(row) {
     );
 
   const m =
-    breed.match(gluedSexRe);
+    breed.match(
+      gluedSexRe
+    );
 
   if (!m) {
     return row;
@@ -547,40 +764,62 @@ function fixSexBreed(row) {
   return row;
 }
 
-function getHeaderDebug(originalText) {
-  const text =
-    normalizeText(originalText);
+// ============================================================
+// HEADER DEBUG
+// ============================================================
 
-  const allLines = text
-    .split(/\n/)
-    .map((s) =>
-      s.replace(/\s+/g, " ").trim()
-    )
-    .filter(Boolean);
+function getHeaderDebug(
+  originalText
+) {
+  const text =
+    normalizeText(
+      originalText
+    );
+
+  const allLines =
+    text
+      .split(/\n/)
+      .map((s) =>
+        s
+          .replace(/\s+/g, " ")
+          .trim()
+      )
+      .filter(Boolean);
 
   const headerPattern =
     /Eil\.\s*Nr\.[\s\S]*?Gimimo\s*data/i;
 
   const headerMatch =
-    text.match(headerPattern);
+    text.match(
+      headerPattern
+    );
 
   const startIdx =
     headerMatch
-      ? text.indexOf(headerMatch[0])
+      ? text.indexOf(
+          headerMatch[0]
+        )
       : -1;
 
   const headerIdx =
     allLines.findIndex(
-      (l) =>
-        /Eil\.\s*Nr\./i.test(l) &&
-        /(Rūšis|Rusis)/i.test(l) &&
-        /Gimimo\s*data/i.test(l)
+      (line) =>
+        /Eil\.\s*Nr\./i.test(
+          line
+        ) &&
+        /(Rūšis|Rusis)/i.test(
+          line
+        ) &&
+        /Gimimo\s*data/i.test(
+          line
+        )
     );
 
   return {
     allLines,
     headerIdx,
     startIdx,
+
     foundHeader:
       startIdx !== -1 ||
       headerIdx !== -1
@@ -588,7 +827,9 @@ function getHeaderDebug(originalText) {
 }
 
 function isValidTag(tag) {
-  if (!tag) return false;
+  if (!tag) {
+    return false;
+  }
 
   return /^(?:[A-Z]{2,3}\d+|\d{8,20})$/i.test(
     String(tag).trim()
@@ -599,9 +840,13 @@ function isValidTag(tag) {
 // INDIVIDUAL ANIMAL PARSER
 // ============================================================
 
-function parseIndividualAnimalsFromText(originalText) {
+function parseIndividualAnimalsFromText(
+  originalText
+) {
   const text =
-    normalizeText(originalText || "");
+    normalizeText(
+      originalText || ""
+    );
 
   const oneLine =
     normalizeOneLine(text);
@@ -611,27 +856,50 @@ function parseIndividualAnimalsFromText(originalText) {
     headerIdx,
     startIdx,
     foundHeader
-  } = getHeaderDebug(text);
+  } =
+    getHeaderDebug(text);
 
-  const rowRe = new RegExp(
-    [
-      `(\\d{1,6})`,
-      `\\s*(${SPECIES_WORDS})`,
-      `\\s*((?:[A-Z]{2,3}\\d+|\\d{8,20}))`,
-      `\\s*([\\s\\S]*?)`,
-      `(\\d{4}[-./]\\d{2}[-./]\\d{2}|\\d{2}[-./]\\d{2}[-./]\\d{4})`,
-      `\\s*(\\d+(?:[,.]\\d+)?)`,
-      `(?:\\s*((?:[A-Z]{2}-\\d+|\\d{4,12})))?`
-    ].join(""),
-    "gi"
-  );
+  /*
+    Finds:
+
+    row index
+    species
+    tag
+    name / sex / breed
+    birth date
+    age
+    optional passport
+  */
+
+  const rowRe =
+    new RegExp(
+      [
+        `(\\d{1,6})`,
+
+        `\\s*(${SPECIES_WORDS})`,
+
+        `\\s*((?:[A-Z]{2,3}\\d+|\\d{8,20}))`,
+
+        `\\s*([\\s\\S]*?)`,
+
+        `(\\d{4}[-./]\\d{2}[-./]\\d{2}|\\d{2}[-./]\\d{2}[-./]\\d{4})`,
+
+        `\\s*(\\d+(?:[,.]\\d+)?)`,
+
+        `(?:\\s*((?:[A-Z]{2}-\\d+|\\d{4,12})))?`
+      ].join(""),
+      "gi"
+    );
 
   const rows = [];
 
   let m;
 
   while (
-    (m = rowRe.exec(oneLine)) !== null
+    (m =
+      rowRe.exec(
+        oneLine
+      )) !== null
   ) {
     const rowIndex =
       Number(m[1]);
@@ -669,14 +937,16 @@ function parseIndividualAnimalsFromText(originalText) {
       );
 
     let row = {
-      row_index: rowIndex,
+      row_index:
+        rowIndex,
 
       species,
 
       species_label:
         speciesRaw,
 
-      tag_no: tag,
+      tag_no:
+        tag,
 
       name,
 
@@ -688,7 +958,9 @@ function parseIndividualAnimalsFromText(originalText) {
         toISO(dateRaw),
 
       age_months:
-        parseAge(ageRaw),
+        parseAge(
+          ageRaw
+        ),
 
       passport:
         passportRaw,
@@ -706,43 +978,57 @@ function parseIndividualAnimalsFromText(originalText) {
     if (
       row.row_index &&
       row.species &&
-      isValidTag(row.tag_no) &&
+      isValidTag(
+        row.tag_no
+      ) &&
       row.birth_date
     ) {
       rows.push(row);
     }
   }
 
+  // Remove duplicates
   const seen =
     new Set();
 
   const unique =
-    rows.filter((r) => {
-      const key =
-        `${r.species}:${r.tag_no}`;
+    rows.filter(
+      (row) => {
+        const key =
+          `${row.species}:${row.tag_no}`;
 
-      if (seen.has(key)) {
-        return false;
+        if (
+          seen.has(key)
+        ) {
+          return false;
+        }
+
+        seen.add(key);
+
+        return true;
       }
-
-      seen.add(key);
-
-      return true;
-    });
+    );
 
   return {
-    rows: unique,
+    rows:
+      unique,
 
     debug: {
       headerIdx,
+
       totalLines:
         allLines.length,
+
       startIdx,
+
       foundHeader,
+
       matched:
         unique.length,
+
       dateAnchoredMatches:
         rows.length,
+
       parser_mode:
         "date_anchored_global"
     }
@@ -753,47 +1039,75 @@ function parseIndividualAnimalsFromText(originalText) {
 // GROUPED ANIMAL PARSER
 // ============================================================
 
-function parseGroupedAnimalsFromText(originalText) {
+function parseGroupedAnimalsFromText(
+  originalText
+) {
   const text =
-    normalizeText(originalText || "");
+    normalizeText(
+      originalText || ""
+    );
 
   const groups = [];
 
-  const lines = text
-    .split(/\n/)
-    .map((s) =>
-      s.replace(/\s+/g, " ").trim()
-    )
-    .filter(Boolean);
+  const lines =
+    text
+      .split(/\n/)
+      .map((s) =>
+        s
+          .replace(/\s+/g, " ")
+          .trim()
+      )
+      .filter(Boolean);
 
-  let insideGroupedTable = false;
+  let insideGroupedTable =
+    false;
 
-  for (const line of lines) {
+  for (
+    const line of lines
+  ) {
     if (
       /Eil\.\s*Nr\.\s*Rūšis\s*Grupė\s*Gyvūnų\s*skaičius\s*Matavimo\s*vienetai/i.test(
         line
       )
     ) {
-      insideGroupedTable = true;
+      insideGroupedTable =
+        true;
+
       continue;
     }
 
     if (
       insideGroupedTable &&
       (
-        /www\.zudc\.lt/i.test(line) ||
-        /Gyvų gyvūnų sąrašas/i.test(line) ||
-        /Deklaruota\s+gyvūnų/i.test(line) ||
-        /^\d+\.\s+Laikytojas/i.test(line) ||
-        /Iš\s+viso\s+ataskaitoje/i.test(line) ||
-        /Iš\s+viso\s+registruota\s+grupėmis/i.test(line)
+        /www\.zudc\.lt/i.test(
+          line
+        ) ||
+        /Gyvų gyvūnų sąrašas/i.test(
+          line
+        ) ||
+        /Deklaruota\s+gyvūnų/i.test(
+          line
+        ) ||
+        /^\d+\.\s+Laikytojas/i.test(
+          line
+        ) ||
+        /Iš\s+viso\s+ataskaitoje/i.test(
+          line
+        ) ||
+        /Iš\s+viso\s+registruota\s+grupėmis/i.test(
+          line
+        )
       )
     ) {
-      insideGroupedTable = false;
+      insideGroupedTable =
+        false;
+
       continue;
     }
 
-    if (!insideGroupedTable) {
+    if (
+      !insideGroupedTable
+    ) {
       continue;
     }
 
@@ -876,7 +1190,10 @@ function parseGroupedAnimalsFromText(originalText) {
     100000;
 
   while (
-    (sm = summaryRe.exec(text)) !== null
+    (sm =
+      summaryRe.exec(
+        text
+      )) !== null
   ) {
     groups.push({
       row_index:
@@ -894,7 +1211,9 @@ function parseGroupedAnimalsFromText(originalText) {
         sm[2].trim(),
 
       animal_count:
-        parseCount(sm[3]),
+        parseCount(
+          sm[3]
+        ),
 
       unit:
         sm[4].trim(),
@@ -910,27 +1229,38 @@ function parseGroupedAnimalsFromText(originalText) {
   const seen =
     new Set();
 
-  return groups.filter((r) => {
-    const key =
-      `${r.species}:${r.group}:${r.animal_count}:${r.unit}`;
+  return groups.filter(
+    (row) => {
+      const key =
+        `${row.species}:${row.group}:${row.animal_count}:${row.unit}`;
 
-    if (seen.has(key)) {
-      return false;
+      if (
+        seen.has(key)
+      ) {
+        return false;
+      }
+
+      seen.add(key);
+
+      return true;
     }
-
-    seen.add(key);
-
-    return true;
-  });
+  );
 }
 
 // ============================================================
 // MAIN PARSER
 // ============================================================
 
-function parseAnimalsFromText(text) {
+function parseAnimalsFromText(
+  text
+) {
+  const metadataResult =
+    parseDocumentMetadata(
+      text
+    );
+
   const metadata =
-    parseDocumentMetadata(text);
+    metadataResult.metadata;
 
   const individualResult =
     parseIndividualAnimalsFromText(
@@ -942,22 +1272,38 @@ function parseAnimalsFromText(text) {
       text
     );
 
-  const speciesCounts = {};
+  const speciesCounts =
+    {};
 
   for (
-    const r of individualResult.rows
+    const row of
+    individualResult.rows
   ) {
-    speciesCounts[r.species] =
-      (speciesCounts[r.species] || 0) +
-      1;
+    speciesCounts[
+      row.species
+    ] =
+      (
+        speciesCounts[
+          row.species
+        ] || 0
+      ) + 1;
   }
 
-  const groupedSpeciesCounts = {};
+  const groupedSpeciesCounts =
+    {};
 
-  for (const r of groupedRows) {
-    groupedSpeciesCounts[r.species] =
-      (groupedSpeciesCounts[r.species] || 0) +
-      1;
+  for (
+    const row of
+    groupedRows
+  ) {
+    groupedSpeciesCounts[
+      row.species
+    ] =
+      (
+        groupedSpeciesCounts[
+          row.species
+        ] || 0
+      ) + 1;
   }
 
   return {
@@ -972,7 +1318,9 @@ function parseAnimalsFromText(text) {
       ...individualResult.debug,
 
       individual_count:
-        individualResult.rows.length,
+        individualResult
+          .rows
+          .length,
 
       grouped_count:
         groupedRows.length,
@@ -985,199 +1333,335 @@ function parseAnimalsFromText(text) {
 
       metadata_found: {
         holder_name:
-          !!metadata.holder_name,
+          !!metadata
+            .holder_name,
 
         client_personal_code:
-          !!metadata.client_personal_code,
+          !!metadata
+            .client_personal_code,
 
         holding_code:
-          !!metadata.holding_code,
+          !!metadata
+            .holding_code,
 
         herd_code:
-          !!metadata.herd_code
-      }
+          !!metadata
+            .herd_code
+      },
+
+      metadata_debug:
+        metadataResult.debug
     }
   };
 }
 
 // ============================================================
-// API HANDLER
+// REQUEST BODY HELPERS
+// ============================================================
+
+async function readRawRequest(
+  req
+) {
+  const chunks = [];
+
+  await new Promise(
+    (
+      resolve,
+      reject
+    ) => {
+      req.on(
+        "data",
+        (chunk) => {
+          chunks.push(
+            chunk
+          );
+        }
+      );
+
+      req.on(
+        "end",
+        resolve
+      );
+
+      req.on(
+        "error",
+        reject
+      );
+    }
+  );
+
+  return Buffer.concat(
+    chunks
+  );
+}
+
+async function readJsonRequest(
+  req
+) {
+  return new Promise(
+    (
+      resolve,
+      reject
+    ) => {
+      let data = "";
+
+      req.setEncoding(
+        "utf8"
+      );
+
+      req.on(
+        "data",
+        (chunk) => {
+          data += chunk;
+        }
+      );
+
+      req.on(
+        "end",
+        () => {
+          try {
+            resolve(
+              data
+                ? JSON.parse(
+                    data
+                  )
+                : {}
+            );
+          } catch (error) {
+            reject(
+              error
+            );
+          }
+        }
+      );
+
+      req.on(
+        "error",
+        reject
+      );
+    }
+  );
+}
+
+// ============================================================
+// HANDLER
+// EXACTLY ONE PDF PER REQUEST
 // ============================================================
 
 module.exports =
-  async function handler(req, res) {
-    if (req.method !== "POST") {
-      res
+  async function handler(
+    req,
+    res
+  ) {
+    if (
+      req.method !== "POST"
+    ) {
+      return res
         .status(405)
         .json({
-          error: "Use POST"
+          error:
+            "Use POST"
         });
-
-      return;
     }
 
     try {
-      const ct =
-        (
-          req.headers["content-type"] ||
-          ""
+      const contentType =
+        String(
+          req.headers[
+            "content-type"
+          ] || ""
         ).toLowerCase();
 
-      let pdfBuffer = null;
+      // We deliberately do not accept multipart.
+      // n8n should send ONE binary PDF directly.
+      if (
+        contentType.includes(
+          "multipart/form-data"
+        )
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Send exactly one PDF per request as raw binary data. Multipart upload is not supported."
+          });
+      }
 
-      // ------------------------------------------------------
-      // Raw PDF body
-      // ------------------------------------------------------
+      let pdfBuffer =
+        null;
+
+      let inputMode =
+        null;
+
+      // ======================================================
+      // ONE RAW PDF
+      // ======================================================
 
       if (
-        ct.includes(
+        contentType.includes(
           "application/pdf"
         ) ||
-        ct.includes(
+        contentType.includes(
           "application/octet-stream"
         )
       ) {
-        const chunks = [];
-
-        await new Promise(
-          (resolve, reject) => {
-            req.on(
-              "data",
-              (c) =>
-                chunks.push(c)
-            );
-
-            req.on(
-              "end",
-              resolve
-            );
-
-            req.on(
-              "error",
-              reject
-            );
-          }
-        );
-
         pdfBuffer =
-          Buffer.concat(chunks);
+          await readRawRequest(
+            req
+          );
+
+        inputMode =
+          "raw_pdf";
       }
 
-      // ------------------------------------------------------
-      // JSON URL
-      // ------------------------------------------------------
+      // ======================================================
+      // ONE PDF URL
+      // ======================================================
 
       else if (
-        ct.includes(
+        contentType.includes(
           "application/json"
         )
       ) {
         const body =
-          await new Promise(
-            (
-              resolve,
-              reject
-            ) => {
-              let data = "";
-
-              req.setEncoding(
-                "utf8"
-              );
-
-              req.on(
-                "data",
-                (ch) => {
-                  data += ch;
-                }
-              );
-
-              req.on(
-                "end",
-                () => {
-                  try {
-                    resolve(
-                      data
-                        ? JSON.parse(
-                            data
-                          )
-                        : {}
-                    );
-                  } catch (e) {
-                    reject(e);
-                  }
-                }
-              );
-
-              req.on(
-                "error",
-                reject
-              );
-            }
+          await readJsonRequest(
+            req
           );
+
+        // Explicitly block arrays / multiple files
+        if (
+          Array.isArray(body) ||
+          Array.isArray(
+            body?.url
+          ) ||
+          body?.urls ||
+          body?.files
+        ) {
+          return res
+            .status(400)
+            .json({
+              error:
+                "Only one PDF is allowed per request."
+            });
+        }
 
         if (
           !body ||
-          !body.url
+          typeof body.url !==
+            "string" ||
+          !body.url.trim()
         ) {
-          res
+          return res
             .status(400)
             .json({
               error:
-                "Provide raw PDF body or JSON { url }"
+                'Send exactly one PDF URL: { "url": "https://..." }'
             });
-
-          return;
         }
 
-        const r =
-          await fetch(body.url);
+        const pdfUrl =
+          body.url.trim();
 
-        if (!r.ok) {
-          res
+        const remoteResponse =
+          await fetch(
+            pdfUrl
+          );
+
+        if (
+          !remoteResponse.ok
+        ) {
+          return res
             .status(400)
             .json({
               error:
-                "Cannot fetch URL",
+                "Cannot fetch PDF URL",
 
               status:
-                r.status
+                remoteResponse.status
             });
-
-          return;
         }
 
         pdfBuffer =
           Buffer.from(
-            await r.arrayBuffer()
+            await remoteResponse.arrayBuffer()
           );
+
+        inputMode =
+          "url";
       }
 
-      // ------------------------------------------------------
-      // Unsupported
-      // ------------------------------------------------------
+      // ======================================================
+      // UNSUPPORTED CONTENT TYPE
+      // ======================================================
 
       else {
-        res
+        return res
           .status(400)
           .json({
             error:
-              "Unsupported content-type",
+              "Unsupported content-type. Send one PDF as application/pdf or application/octet-stream.",
 
-            contentType:
-              ct
+            contentType
           });
-
-        return;
       }
 
-      // ------------------------------------------------------
-      // Parse PDF
-      // ------------------------------------------------------
+      // ======================================================
+      // VALIDATE FILE
+      // ======================================================
+
+      if (
+        !pdfBuffer ||
+        !pdfBuffer.length
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "PDF file is empty."
+          });
+      }
+
+      // Simple PDF signature check
+      const signature =
+        pdfBuffer
+          .subarray(0, 5)
+          .toString(
+            "ascii"
+          );
+
+      if (
+        signature !== "%PDF-"
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Input is not a valid PDF file."
+          });
+      }
+
+      // ======================================================
+      // PARSE PDF
+      // ======================================================
 
       const parsed =
         await pdfParse(
           pdfBuffer
         );
+
+      const extractedText =
+        parsed.text || "";
+
+      if (
+        !extractedText.trim()
+      ) {
+        return res
+          .status(422)
+          .json({
+            error:
+              "PDF contains no extractable text."
+          });
+      }
 
       const {
         metadata,
@@ -1186,58 +1670,72 @@ module.exports =
         debug
       } =
         parseAnimalsFromText(
-          parsed.text || ""
+          extractedText
         );
+
+      // ======================================================
+      // RESPONSE
+      // ======================================================
 
       res.setHeader(
         "Cache-Control",
         "no-store"
       );
 
-      // ------------------------------------------------------
-      // IMPORTANT:
-      // metadata is included BOTH inside metadata {}
-      // and important IDs at root level for n8n
-      // ------------------------------------------------------
-
-      res
+      return res
         .status(200)
         .json({
-          // Most important for farm matching
+          ok: true,
+
+          input_mode:
+            inputMode,
+
+          // IMPORTANT identifiers for n8n farm matching
           client_personal_code:
-            metadata.client_personal_code,
+            metadata
+              .client_personal_code,
 
           personal_code:
-            metadata.client_personal_code,
+            metadata
+              .client_personal_code,
 
           holding_code:
-            metadata.holding_code,
+            metadata
+              .holding_code,
 
           vic_farm_code:
-            metadata.holding_code,
+            metadata
+              .holding_code,
 
           herd_code:
-            metadata.herd_code,
+            metadata
+              .herd_code,
 
           holder_name:
-            metadata.holder_name,
+            metadata
+              .holder_name,
 
           holder_type:
-            metadata.holder_type,
+            metadata
+              .holder_type,
 
           declared_species:
-            metadata.declared_species,
+            metadata
+              .declared_species,
 
           holder_address:
-            metadata.holder_address,
+            metadata
+              .holder_address,
 
           herd_address:
-            metadata.herd_address,
+            metadata
+              .herd_address,
 
           registration_date:
-            metadata.registration_date,
+            metadata
+              .registration_date,
 
-          // Full metadata object too
+          // Complete metadata object
           metadata,
 
           // Animals
@@ -1247,6 +1745,7 @@ module.exports =
           animals:
             rows,
 
+          // Grouped animals
           grouped_count:
             groupedRows.length,
 
@@ -1255,17 +1754,19 @@ module.exports =
 
           debug
         });
-    } catch (e) {
+    } catch (error) {
       console.error(
         "[extractpdf] ERROR:",
-        e
+        error
       );
 
-      res
+      return res
         .status(500)
         .json({
+          ok: false,
+
           error:
-            e?.message ||
+            error?.message ||
             "parse_error"
         });
     }
